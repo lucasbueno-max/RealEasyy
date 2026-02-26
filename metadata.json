@@ -1,0 +1,5 @@
+{
+  "name": "RelEasy",
+  "description": "Sistema completo para gestão de empresas, modelos de relatórios e envio automatizado via Microsoft Graph API.",
+  "requestFramePermissions": []
+}
