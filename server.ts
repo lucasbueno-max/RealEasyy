@@ -9,6 +9,10 @@ import multer from "multer";
 import AdmZip from "adm-zip";
 import axios from "axios";
 import { fileURLToPath } from "url";
+import { createRequire } from "module";
+
+const require = createRequire(import.meta.url);
+const pdf = require("pdf-parse");
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -67,7 +71,7 @@ db.exec(`
     access_token TEXT,
     refresh_token TEXT,
     expires_at INTEGER,
-    FOREIGN KEY(user_id) REFERENCES users(id)
+    last_auth_at INTEGER
   );
 
   CREATE TABLE IF NOT EXISTS app_settings (
@@ -80,6 +84,7 @@ db.exec(`
     file_name TEXT,
     content TEXT, -- Base64
     company_id INTEGER,
+    extracted_value TEXT,
     uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(company_id) REFERENCES companies(id)
   );
@@ -91,6 +96,38 @@ try {
 } catch (e) {}
 try {
   db.exec("ALTER TABLE companies ADD COLUMN manager_id INTEGER");
+} catch (e) {}
+
+try {
+  db.exec("ALTER TABLE imported_files ADD COLUMN extracted_value TEXT");
+} catch (e) {}
+
+// Migration: Remove foreign key from oauth_tokens if it exists (by recreating table)
+try {
+  const tableInfo = db.prepare("PRAGMA foreign_key_list(oauth_tokens)").all();
+  if (tableInfo.length > 0) {
+    console.log("Migrating oauth_tokens to remove foreign key constraint...");
+    db.exec(`
+      CREATE TABLE oauth_tokens_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        access_token TEXT,
+        refresh_token TEXT,
+        expires_at INTEGER,
+        last_auth_at INTEGER
+      );
+      INSERT INTO oauth_tokens_new (id, user_id, access_token, refresh_token, expires_at) 
+      SELECT id, user_id, access_token, refresh_token, expires_at FROM oauth_tokens;
+      DROP TABLE oauth_tokens;
+      ALTER TABLE oauth_tokens_new RENAME TO oauth_tokens;
+    `);
+  }
+} catch (e) {
+  console.error("Migration error:", e);
+}
+
+try {
+  db.exec("ALTER TABLE oauth_tokens ADD COLUMN last_auth_at INTEGER");
 } catch (e) {}
 
 // Seed/Update Admin User
@@ -107,7 +144,8 @@ if (!existingAdmin) {
 // Also ensure the old admin has the role if it exists, or just leave it
 db.prepare("UPDATE users SET role = 'admin' WHERE email = 'admin@example.com'").run();
 
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Auth Middleware
 const authenticate = (req: any, res: any, next: any) => {
@@ -134,6 +172,13 @@ const isAdmin = (req: any, res: any, next: any) => {
 async function getValidToken(userId: number) {
   const tokenRecord = db.prepare("SELECT * FROM oauth_tokens WHERE user_id = ?").get(userId) as any;
   if (!tokenRecord) return null;
+
+  // Check if the connection is older than 60 days
+  const SIXTY_DAYS_MS = 60 * 24 * 60 * 60 * 1000;
+  if (tokenRecord.last_auth_at && Date.now() - tokenRecord.last_auth_at > SIXTY_DAYS_MS) {
+    console.log(`[OAuth] Connection expired (60 days limit) for user ${userId}`);
+    return null;
+  }
 
   // Check if token is expired (with 5 min buffer)
   if (Date.now() < tokenRecord.expires_at - 300000) {
@@ -192,7 +237,18 @@ app.post("/api/auth/login", (req, res) => {
   res.json({ token, user: { id: user.id, email: user.email, name: user.name, role: user.role } });
 });
 
-// User Management (Admin only)
+// User Management
+app.get("/api/users/me", authenticate, (req: any, res) => {
+  const user = db.prepare("SELECT id, email, name, role, signature FROM users WHERE id = ?").get(req.user.id);
+  res.json(user);
+});
+
+app.post("/api/users/signature", authenticate, (req: any, res) => {
+  const { signature } = req.body;
+  db.prepare("UPDATE users SET signature = ? WHERE id = ?").run(signature, req.user.id);
+  res.json({ success: true });
+});
+
 app.get("/api/users", authenticate, isAdmin, (req, res) => {
   const users = db.prepare("SELECT id, email, name, role, signature FROM users").all();
   res.json(users);
@@ -344,8 +400,18 @@ app.get("/api/stats", authenticate, (req, res) => {
 // Helper to get consistent Redirect URI
 const getRedirectUri = (req: express.Request) => {
   if (process.env.MICROSOFT_REDIRECT_URI) return process.env.MICROSOFT_REDIRECT_URI;
-  const appUrl = process.env.APP_URL || `${req.protocol}://${req.get('host')}`;
-  // Remove trailing slash if present in appUrl
+  
+  // Try to get from environment first
+  let appUrl = process.env.APP_URL;
+  
+  // Fallback to request headers
+  if (!appUrl) {
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.headers['x-forwarded-host'] || req.get('host');
+    appUrl = `${protocol}://${host}`;
+  }
+
+  // Remove trailing slash if present
   const base = appUrl.endsWith('/') ? appUrl.slice(0, -1) : appUrl;
   return `${base}/auth/callback`;
 };
@@ -458,12 +524,14 @@ app.post("/api/auth/microsoft/callback", authenticate, async (req: any, res) => 
 
     const { access_token, refresh_token, expires_in } = tokenResponse.data;
     const expires_at = Date.now() + expires_in * 1000;
+    const last_auth_at = Date.now();
+    const userId = req.user.id;
 
-    db.prepare("DELETE FROM oauth_tokens WHERE user_id = ?").run(req.user.id);
-    db.prepare("INSERT INTO oauth_tokens (user_id, access_token, refresh_token, expires_at) VALUES (?, ?, ?, ?)")
-      .run(req.user.id, access_token, refresh_token, expires_at);
+    db.prepare("DELETE FROM oauth_tokens WHERE user_id = ?").run(userId);
+    db.prepare("INSERT INTO oauth_tokens (user_id, access_token, refresh_token, expires_at, last_auth_at) VALUES (?, ?, ?, ?, ?)")
+      .run(userId, access_token, refresh_token, expires_at, last_auth_at);
 
-    console.log("[OAuth] Token exchange successful for user:", req.user.id);
+    console.log(`[OAuth] Token exchange successful for user ${userId}`);
     res.json({ success: true });
   } catch (err: any) {
     const errorData = err.response?.data;
@@ -475,16 +543,52 @@ app.post("/api/auth/microsoft/callback", authenticate, async (req: any, res) => 
   }
 });
 
-app.get("/api/auth/microsoft/status", authenticate, (req: any, res) => {
-  const token = db.prepare("SELECT * FROM oauth_tokens WHERE user_id = ?").get(req.user.id) as any;
+app.get("/api/auth/microsoft/status", authenticate, async (req: any, res) => {
+  const token = await getValidToken(req.user.id);
   res.json({ connected: !!token });
 });
+
+// --- PDF Extraction Helper ---
+async function extractValorALiquidar(buffer: Buffer): Promise<string | null> {
+  try {
+    const data = await pdf(buffer);
+    const text = data.text;
+    
+    // Search for "Valor a Liquidar (R$)" followed by a value
+    // The value usually follows on the next line or after some spaces
+    // Example: Valor a Liquidar (R$) \n 1.234,56
+    const regex = /Valor\s+a\s+Liquidar\s*\(R\$\)\s*([\d.,]+)/i;
+    const match = text.match(regex);
+    
+    if (match && match[1]) {
+      return match[1].trim();
+    }
+    
+    // Try another pattern if the first one fails (sometimes it's on the next line)
+    const lines = text.split('\n').map(l => l.trim());
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].includes("Valor a Liquidar (R$)")) {
+        // Check next few lines for a currency-like string
+        for (let j = 1; j <= 3; j++) {
+          if (lines[i+j] && /^[\d.,]+$/.test(lines[i+j])) {
+            return lines[i+j];
+          }
+        }
+      }
+    }
+    
+    return null;
+  } catch (err) {
+    console.error("[PDF Extraction] Error:", err);
+    return null;
+  }
+}
 
 // --- File Handling ---
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-app.post("/api/upload/zip", authenticate, upload.single("file"), (req, res) => {
+app.post("/api/upload/zip", authenticate, upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No file uploaded" });
   
   try {
@@ -492,23 +596,43 @@ app.post("/api/upload/zip", authenticate, upload.single("file"), (req, res) => {
     const entries = zip.getEntries();
     const companies = db.prepare("SELECT * FROM companies").all() as any[];
 
-    const insertFile = db.prepare("INSERT INTO imported_files (file_name, content, company_id) VALUES (?, ?, ?)");
+    const insertFile = db.prepare("INSERT INTO imported_files (file_name, content, company_id, extracted_value) VALUES (?, ?, ?, ?)");
 
-    entries.forEach(entry => {
-      if (entry.isDirectory || !entry.entryName.toLowerCase().endsWith(".pdf")) return;
+    for (const entry of entries) {
+      if (entry.isDirectory || !entry.entryName.toLowerCase().endsWith(".pdf")) continue;
       
       const fileName = entry.entryName;
-      const matchedCompany = companies.find(c => 
-        fileName.includes(c.cnpj) || 
-        fileName.toLowerCase().includes(c.razao_social.toLowerCase()) ||
-        fileName.toLowerCase().includes(c.nome_fantasia.toLowerCase())
-      );
+      const fileNameLower = fileName.toLowerCase();
+      
+      const matchedCompany = companies.find(c => {
+        const cnpjClean = c.cnpj.replace(/\D/g, '');
+        const nomeFantasiaLower = c.nome_fantasia.toLowerCase();
+        const razaoSocialLower = c.razao_social.toLowerCase();
+        
+        return (cnpjClean && fileName.includes(cnpjClean)) || 
+               (nomeFantasiaLower && fileNameLower.includes(nomeFantasiaLower)) ||
+               (razaoSocialLower && fileNameLower.includes(razaoSocialLower));
+      });
 
-      const content = zip.readFile(entry).toString("base64");
-      insertFile.run(fileName, content, matchedCompany?.id || null);
-    });
+      const buffer = zip.readFile(entry);
+      const content = buffer.toString("base64");
+      const extractedValue = await extractValorALiquidar(buffer);
+      
+      insertFile.run(fileName, content, matchedCompany?.id || null, extractedValue);
+    }
 
     res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/pdf/extract", authenticate, upload.single("file"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+  
+  try {
+    const valor = await extractValorALiquidar(req.file.buffer);
+    res.json({ valor });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -524,13 +648,34 @@ app.get("/api/imported-files", authenticate, (req, res) => {
   res.json(files);
 });
 
-app.delete("/api/imported-files/:id", authenticate, (req, res) => {
-  db.prepare("DELETE FROM imported_files WHERE id = ?").run(req.params.id);
-  res.json({ success: true });
+app.delete("/api/imported-files-clear", authenticate, (req, res) => {
+  console.log("[Files] Clearing all imported files...");
+  try {
+    const result = db.prepare("DELETE FROM imported_files").run();
+    console.log(`[Files] Deleted ${result.changes} files.`);
+    res.json({ success: true, deleted: result.changes });
+  } catch (err: any) {
+    console.error("[Files] Error clearing files:", err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.delete("/api/imported-files", authenticate, (req, res) => {
-  db.prepare("DELETE FROM imported_files").run();
+app.delete("/api/imported-files-batch", authenticate, (req, res) => {
+  const { ids } = req.body;
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: "IDs inválidos" });
+  }
+  try {
+    const placeholders = ids.map(() => "?").join(",");
+    db.prepare(`DELETE FROM imported_files WHERE id IN (${placeholders})`).run(...ids);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/api/imported-files/:id", authenticate, (req, res) => {
+  db.prepare("DELETE FROM imported_files WHERE id = ?").run(req.params.id);
   res.json({ success: true });
 });
 
@@ -540,16 +685,16 @@ app.post("/api/reports/send", authenticate, async (req: any, res) => {
   const { templateId, items, mesReferencia } = req.body; 
   
   const accessToken = await getValidToken(req.user.id);
-  if (!accessToken) return res.status(400).json({ error: "Microsoft Graph não conectado ou falha ao renovar acesso." });
+  if (!accessToken) return res.status(400).json({ error: "Sua conta Microsoft não está conectada. Conecte-a em seu perfil." });
 
   const template = db.prepare("SELECT * FROM templates WHERE id = ?").get(templateId) as any;
   if (!template) return res.status(404).json({ error: "Modelo não encontrado" });
 
   const globalCcRecord = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("global_cc_email") as any;
   const globalCc = globalCcRecord?.value;
-  
+
   const currentUser = db.prepare("SELECT signature FROM users WHERE id = ?").get(req.user.id) as any;
-  const signatureHtml = currentUser?.signature ? `<br><br><img src="${currentUser.signature}" style="max-width: 300px; height: auto;">` : "";
+  const finalSignatureHtml = currentUser?.signature ? `<br><br><img src="${currentUser.signature}" style="max-width: 300px; height: auto;">` : "";
   
   const results = [];
 
@@ -562,7 +707,7 @@ app.post("/api/reports/send", authenticate, async (req: any, res) => {
       if (emails.length === 0) throw new Error("Nenhum e-mail cadastrado para esta empresa");
 
       let subject = template.subject;
-      let body = template.body + signatureHtml;
+      let body = template.body + finalSignatureHtml;
 
       const replacements: any = {
         razao_social: company.razao_social,
@@ -604,10 +749,11 @@ app.post("/api/reports/send", authenticate, async (req: any, res) => {
       }
 
       if (item.pdfBase64) {
-        // Format: Modelo de relatório + nome fantasia + mes ano de referencia
+        // Format: (nome do modelo - nome fantasia - mês/ano ref.)
+        const safeTemplateName = template.name.replace(/[/\\?%*:|"<>]/g, '-');
         const safeCompanyName = company.nome_fantasia.replace(/[/\\?%*:|"<>]/g, '-');
         const safeMesRef = (mesReferencia || "").replace(/[/\\?%*:|"<>]/g, '-');
-        const attachmentName = `Modelo de relatório ${safeCompanyName} ${safeMesRef}.pdf`.trim();
+        const attachmentName = `(${safeTemplateName} - ${safeCompanyName} - ${safeMesRef}).pdf`.trim();
 
         message.message.attachments = [
           {

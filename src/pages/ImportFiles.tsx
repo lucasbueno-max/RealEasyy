@@ -26,6 +26,8 @@ export default function ImportFiles() {
   const [isLoading, setIsLoading] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
+  const [isClearing, setIsClearing] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
 
   useEffect(() => {
     fetchFiles();
@@ -36,10 +38,43 @@ export default function ImportFiles() {
     try {
       const res = await api.get('/imported-files');
       setFiles(res.data);
+      setSelectedIds([]);
     } catch (err) {
       console.error(err);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.checked) {
+      setSelectedIds(files.map(f => f.id));
+    } else {
+      setSelectedIds([]);
+    }
+  };
+
+  const handleSelectFile = (id: number) => {
+    setSelectedIds(prev => 
+      prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
+    );
+  };
+
+  const handleDeleteSelected = async () => {
+    if (selectedIds.length === 0) return;
+    if (!confirm(`Tem certeza que deseja excluir os ${selectedIds.length} arquivos selecionados?`)) return;
+    
+    setIsClearing(true);
+    try {
+      await api.delete('/imported-files-batch', { data: { ids: selectedIds } });
+      setFiles(prev => prev.filter(f => !selectedIds.includes(f.id)));
+      setSelectedIds([]);
+      setMessage({ type: 'success', text: 'Arquivos selecionados foram removidos.' });
+    } catch (err) {
+      console.error(err);
+      setMessage({ type: 'error', text: 'Erro ao excluir arquivos selecionados.' });
+    } finally {
+      setIsClearing(false);
     }
   };
 
@@ -78,12 +113,16 @@ export default function ImportFiles() {
 
   const handleClearAll = async () => {
     if (!confirm('Tem certeza que deseja excluir TODOS os arquivos importados?')) return;
+    setIsClearing(true);
     try {
-      await api.delete('/imported-files');
+      await api.delete('/imported-files-clear');
       setFiles([]);
+      setMessage({ type: 'success', text: 'Todos os arquivos foram removidos.' });
     } catch (err) {
       console.error(err);
-      alert('Erro ao limpar arquivos');
+      setMessage({ type: 'error', text: 'Erro ao limpar arquivos.' });
+    } finally {
+      setIsClearing(false);
     }
   };
 
@@ -95,11 +134,22 @@ export default function ImportFiles() {
           <p className="text-slate-500">Faça o upload de arquivos PDF (via ZIP) para serem usados nos relatórios.</p>
         </div>
         <div className="flex items-center gap-3">
+          {selectedIds.length > 0 && (
+            <button
+              onClick={handleDeleteSelected}
+              disabled={isClearing}
+              className="px-4 py-2 bg-red-50 text-red-600 hover:bg-red-100 rounded-xl font-medium transition-colors disabled:opacity-50 flex items-center gap-2"
+            >
+              {isClearing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+              Excluir Selecionados ({selectedIds.length})
+            </button>
+          )}
           <button
             onClick={handleClearAll}
-            disabled={files.length === 0}
-            className="px-4 py-2 text-red-600 hover:bg-red-50 rounded-xl font-medium transition-colors disabled:opacity-50"
+            disabled={files.length === 0 || isClearing}
+            className="px-4 py-2 text-slate-500 hover:bg-slate-100 rounded-xl font-medium transition-colors disabled:opacity-50 flex items-center gap-2"
           >
+            {isClearing && <Loader2 className="w-4 h-4 animate-spin" />}
             Limpar Tudo
           </button>
           <label className="bg-orange-600 hover:bg-orange-700 text-white px-6 py-2 rounded-xl font-bold flex items-center gap-2 transition-colors cursor-pointer shadow-sm shadow-orange-200">
@@ -131,6 +181,14 @@ export default function ImportFiles() {
           <table className="w-full text-left">
             <thead className="bg-slate-50 border-b border-slate-100">
               <tr>
+                <th className="px-6 py-4 w-10">
+                  <input 
+                    type="checkbox" 
+                    checked={files.length > 0 && selectedIds.length === files.length}
+                    onChange={handleSelectAll}
+                    className="rounded border-slate-300 text-orange-600 focus:ring-orange-500"
+                  />
+                </th>
                 <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">Arquivo PDF</th>
                 <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">Empresa Identificada</th>
                 <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">Data Importação</th>
@@ -152,7 +210,15 @@ export default function ImportFiles() {
                 </tr>
               ) : (
                 files.map((file) => (
-                  <tr key={file.id} className="hover:bg-slate-50 transition-colors">
+                  <tr key={file.id} className={`hover:bg-slate-50 transition-colors ${selectedIds.includes(file.id) ? 'bg-orange-50/30' : ''}`}>
+                    <td className="px-6 py-4">
+                      <input 
+                        type="checkbox" 
+                        checked={selectedIds.includes(file.id)}
+                        onChange={() => handleSelectFile(file.id)}
+                        className="rounded border-slate-300 text-orange-600 focus:ring-orange-500"
+                      />
+                    </td>
                     <td className="px-6 py-4">
                       <div className="flex items-center gap-3">
                         <div className="w-8 h-8 rounded-lg bg-orange-50 flex items-center justify-center text-orange-600">

@@ -28,7 +28,7 @@ export default function AuthCallback() {
             window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS' }, '*');
             window.close();
           } else {
-            window.location.href = '/settings';
+            window.location.href = '/profile';
           }
         })
         .catch(err => {

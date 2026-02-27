@@ -3,6 +3,7 @@ import api from '../services/api';
 import { 
   Send, 
   FileUp, 
+  Upload,
   CheckCircle2, 
   AlertCircle, 
   Loader2, 
@@ -67,7 +68,19 @@ export default function SendReports() {
         
         setItems(companiesRes.data.map((c: any) => {
           // Try to find a matching file automatically
-          const matchedFile = filesRes.data.find((f: any) => f.company_id === c.id);
+          let matchedFile = filesRes.data.find((f: any) => f.company_id === c.id);
+          
+          if (!matchedFile) {
+            // Fallback: search by name in files
+            const nomeFantasiaLower = c.nome_fantasia.toLowerCase();
+            const cnpjClean = c.cnpj.replace(/\D/g, '');
+            
+            matchedFile = filesRes.data.find((f: any) => {
+              const fileNameLower = f.file_name.toLowerCase();
+              return (cnpjClean && f.file_name.includes(cnpjClean)) || 
+                     (nomeFantasiaLower && fileNameLower.includes(nomeFantasiaLower));
+            });
+          }
           
           return {
             companyId: c.id,
@@ -77,10 +90,10 @@ export default function SendReports() {
             managerName: c.manager_name,
             dataAporte: '',
             dataDebito: '',
-            valor: '',
+            valor: matchedFile ? (matchedFile.extracted_value || '') : '',
             pdfBase64: matchedFile ? matchedFile.content : null,
             pdfName: matchedFile ? matchedFile.file_name : null,
-            status: 'pending',
+            status: matchedFile ? 'ready' : 'pending',
             selected: true
           };
         }));
@@ -99,10 +112,57 @@ export default function SendReports() {
             ...item, 
             pdfBase64: selectedFile ? selectedFile.content : null, 
             pdfName: selectedFile ? selectedFile.file_name : null, 
+            valor: selectedFile ? (selectedFile.extracted_value || item.valor) : item.valor,
             status: selectedFile ? 'ready' : 'pending' 
           } 
         : item
     ));
+  };
+
+  const handleManualPdf = async (companyId: number, e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsLoading(true);
+    try {
+      // Extract value from PDF
+      const formData = new FormData();
+      formData.append('file', file);
+      const extractRes = await api.post('/pdf/extract', formData);
+      const extractedValor = extractRes.data.valor;
+
+      const reader = new FileReader();
+      reader.onload = () => {
+        const base64 = (reader.result as string).split(',')[1];
+        setItems(prev => prev.map(item => 
+          item.companyId === companyId 
+            ? { 
+                ...item, 
+                pdfBase64: base64, 
+                pdfName: file.name, 
+                valor: extractedValor || item.valor,
+                status: 'ready' 
+              } 
+            : item
+        ));
+      };
+      reader.readAsDataURL(file);
+    } catch (err) {
+      console.error('Error extracting PDF value:', err);
+      // Still allow the PDF but without extracted value
+      const reader = new FileReader();
+      reader.onload = () => {
+        const base64 = (reader.result as string).split(',')[1];
+        setItems(prev => prev.map(item => 
+          item.companyId === companyId 
+            ? { ...item, pdfBase64: base64, pdfName: file.name, status: 'ready' } 
+            : item
+        ));
+      };
+      reader.readAsDataURL(file);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const updateItem = (companyId: number, field: keyof SendItem, value: string) => {
@@ -293,18 +353,28 @@ export default function SendReports() {
                         </div>
                       )}
                       {item.status === 'sending' && <Loader2 className="w-5 h-5 text-orange-500 animate-spin" />}
-                      <select
-                        onChange={(e) => handleFileSelect(item.companyId, e.target.value)}
-                        value={importedFiles.find(f => f.file_name === item.pdfName)?.id || ''}
-                        className={`text-xs px-2 py-1.5 rounded-lg border outline-none transition-all max-w-[150px] ${
-                          item.pdfBase64 ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-slate-50 border-slate-200 text-slate-500'
-                        }`}
-                      >
-                        <option value="">Selecionar PDF...</option>
-                        {importedFiles.map(f => (
-                          <option key={f.id} value={f.id}>{f.file_name}</option>
-                        ))}
-                      </select>
+                      <div className="flex items-center gap-2">
+                        <select
+                          onChange={(e) => handleFileSelect(item.companyId, e.target.value)}
+                          value={importedFiles.find(f => f.file_name === item.pdfName)?.id || ''}
+                          className={`text-xs px-2 py-1.5 rounded-lg border outline-none transition-all max-w-[150px] ${
+                            item.pdfBase64 ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-slate-50 border-slate-200 text-slate-500'
+                          }`}
+                        >
+                          <option value="">Selecionar PDF...</option>
+                          {importedFiles.map(f => (
+                            <option key={f.id} value={f.id}>{f.file_name}</option>
+                          ))}
+                        </select>
+                        <label className={`p-1.5 rounded-lg border transition-all cursor-pointer ${
+                          item.pdfBase64 && !importedFiles.some(f => f.file_name === item.pdfName) 
+                            ? 'bg-emerald-50 border-emerald-200 text-emerald-600' 
+                            : 'bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100'
+                        }`}>
+                          <Upload className="w-3.5 h-3.5" />
+                          <input type="file" accept=".pdf" className="hidden" onChange={(e) => handleManualPdf(item.companyId, e)} />
+                        </label>
+                      </div>
                     </div>
                   </div>
 
@@ -380,7 +450,7 @@ export default function SendReports() {
               {!isGraphConnected && (
                 <div className="p-3 bg-amber-50 border border-amber-100 rounded-xl flex gap-2 text-amber-700 text-xs">
                   <AlertCircle className="w-4 h-4 shrink-0" />
-                  Sua conta Microsoft não está conectada. Vá em Configurações para conectar.
+                  Sua conta Microsoft não está conectada. Vá em seu perfil para conectar.
                 </div>
               )}
             </div>

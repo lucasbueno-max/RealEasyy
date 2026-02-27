@@ -13,25 +13,19 @@ import {
 } from 'lucide-react';
 
 export default function Settings() {
-  const [isConnected, setIsConnected] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
+  const [creds, setCreds] = useState({ 
+    clientId: '', 
+    clientSecret: '', 
+    tenantId: 'common', 
+    globalCc: '', 
+    redirectUri: '' 
+  });
   const [isSaving, setIsSaving] = useState(false);
-  const [creds, setCreds] = useState({ clientId: '', clientSecret: '', tenantId: 'common', globalCc: '', redirectUri: '' });
   const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
 
   useEffect(() => {
-    checkStatus();
     fetchCreds();
   }, []);
-
-  const checkStatus = async () => {
-    try {
-      const res = await api.get('/auth/microsoft/status');
-      setIsConnected(res.data.connected);
-    } catch (err) {
-      console.error(err);
-    }
-  };
 
   const fetchCreds = async () => {
     try {
@@ -60,32 +54,6 @@ export default function Settings() {
       setMessage({ type: 'error', text: 'Erro ao salvar credenciais.' });
     } finally {
       setIsSaving(false);
-    }
-  };
-
-  const handleConnect = async () => {
-    setIsLoading(true);
-    setMessage(null);
-    try {
-      const res = await api.get('/auth/microsoft/url');
-      const authWindow = window.open(res.data.url, 'microsoft_auth', 'width=600,height=700');
-      
-      if (!authWindow) {
-        setMessage({ type: 'error', text: 'O popup foi bloqueado pelo navegador. Por favor, permita popups para este site.' });
-        setIsLoading(false);
-        return;
-      }
-
-      const checkWindow = setInterval(() => {
-        if (authWindow?.closed) {
-          clearInterval(checkWindow);
-          checkStatus();
-          setIsLoading(false);
-        }
-      }, 1000);
-    } catch (err: any) {
-      setMessage({ type: 'error', text: err.response?.data?.error || 'Erro ao iniciar conexão.' });
-      setIsLoading(false);
     }
   };
 
@@ -187,58 +155,6 @@ export default function Settings() {
             </button>
           </div>
         </form>
-      </div>
-
-      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
-        <div className="p-6 border-b border-slate-100 flex items-center gap-4">
-          <div className="bg-orange-50 p-3 rounded-xl text-orange-600">
-            <Mail className="w-6 h-6" />
-          </div>
-          <div>
-            <h3 className="font-bold text-slate-900">Integração com Outlook</h3>
-            <p className="text-sm text-slate-500">Necessário para o envio automático de e-mails via Microsoft Graph API.</p>
-          </div>
-        </div>
-        <div className="p-6">
-          <div className={`p-4 rounded-xl border flex items-center justify-between ${
-            isConnected ? 'bg-emerald-50 border-emerald-100' : 'bg-slate-50 border-slate-200'
-          }`}>
-            <div className="flex items-center gap-3">
-              {isConnected ? (
-                <CheckCircle2 className="w-5 h-5 text-emerald-500" />
-              ) : (
-                <AlertCircle className="w-5 h-5 text-slate-400" />
-              )}
-              <div>
-                <p className={`text-sm font-bold ${isConnected ? 'text-emerald-700' : 'text-slate-700'}`}>
-                  {isConnected ? 'Conta Conectada' : 'Conta não conectada'}
-                </p>
-                <p className="text-xs text-slate-500">
-                  {isConnected 
-                    ? 'O sistema está pronto para enviar e-mails.' 
-                    : 'Conecte sua conta Microsoft para habilitar o envio de relatórios.'}
-                </p>
-              </div>
-            </div>
-            <button
-              onClick={handleConnect}
-              disabled={isLoading || !creds.clientId}
-              className={`px-4 py-2 rounded-lg text-sm font-bold transition-all flex items-center gap-2 ${
-                isConnected 
-                  ? 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-50' 
-                  : 'bg-orange-600 text-white hover:bg-orange-700 disabled:opacity-50'
-              }`}
-            >
-              {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ExternalLink className="w-4 h-4" />}
-              {isConnected ? 'Reconectar' : 'Conectar Agora'}
-            </button>
-          </div>
-          {!creds.clientId && (
-            <p className="text-[10px] text-amber-600 mt-2 font-medium">
-              * Configure o Client ID acima antes de tentar conectar.
-            </p>
-          )}
-        </div>
       </div>
 
       <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">

@@ -56,14 +56,10 @@ export default function Companies() {
   const onSubmit = async (data: CompanyInput) => {
     setIsLoading(true);
     try {
-      const payload = {
-        ...data,
-        manager_id: data.manager_id ? Number(data.manager_id) : null
-      };
       if (editingCompany) {
-        await api.put(`/companies/${editingCompany.id}`, payload);
+        await api.put(`/companies/${editingCompany.id}`, data);
       } else {
-        await api.post('/companies', payload);
+        await api.post('/companies', data);
       }
       fetchCompanies();
       closeModal();
@@ -262,7 +258,9 @@ export default function Companies() {
                 <div className="md:col-span-2">
                   <label className="block text-sm font-medium text-slate-700 mb-1.5">Gestor Responsável</label>
                   <select
-                    {...register('manager_id')}
+                    {...register('manager_id', { 
+                      setValueAs: v => v === "" ? null : Number(v) 
+                    })}
                     className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none transition-all"
                   >
                     <option value="">Selecione um gestor...</option>

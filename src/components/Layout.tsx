@@ -12,7 +12,8 @@ import {
   LogOut,
   Menu,
   X,
-  Users
+  Users,
+  User
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -34,6 +35,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     { icon: FileUp, label: 'Importar Arquivos', path: '/import-files' },
     { icon: Send, label: 'Enviar Relatórios', path: '/send' },
     { icon: History, label: 'Histórico', path: '/history' },
+    { icon: User, label: 'Meu Perfil', path: '/profile' },
     { icon: Users, label: 'Usuários', path: '/users', adminOnly: true },
     { icon: Settings, label: 'Configurações', path: '/settings', adminOnly: true },
   ];

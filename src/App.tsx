@@ -11,6 +11,7 @@ import SendReports from './pages/SendReports';
 import History from './pages/History';
 import Settings from './pages/Settings';
 import AuthCallback from './pages/AuthCallback';
+import Profile from './pages/Profile';
 
 import Users from './pages/Users';
 
@@ -37,6 +38,7 @@ export default function App() {
           <Route path="/import-files" element={<ProtectedRoute><ImportFiles /></ProtectedRoute>} />
           <Route path="/send" element={<ProtectedRoute><SendReports /></ProtectedRoute>} />
           <Route path="/history" element={<ProtectedRoute><History /></ProtectedRoute>} />
+          <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
           <Route path="/settings" element={<ProtectedRoute adminOnly><Settings /></ProtectedRoute>} />
           <Route path="/users" element={<ProtectedRoute adminOnly><Users /></ProtectedRoute>} />
           
