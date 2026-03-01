@@ -2,7 +2,6 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import fs from "fs";
-import Database from "better-sqlite3";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import multer from "multer";
@@ -13,6 +12,26 @@ import { createRequire } from "module";
 import { createClient } from "@supabase/supabase-js";
 
 const require = createRequire(import.meta.url);
+let Database: any;
+
+// Lazy load better-sqlite3 to avoid crashing on Vercel
+async function initDatabase() {
+  if (process.env.VERCEL) {
+    console.log("[Database] Running on Vercel, skipping SQLite initialization.");
+    return null;
+  }
+  try {
+    const sqlite = await import("better-sqlite3");
+    Database = sqlite.default;
+    const db = new Database("database.db");
+    db.pragma("journal_mode = WAL");
+    db.pragma("foreign_keys = ON");
+    return db;
+  } catch (e: any) {
+    console.warn("[Database] SQLite could not be initialized:", e.message);
+    return null;
+  }
+}
 let pdf: any;
 try {
   const pdfImport = require("pdf-parse");
@@ -31,95 +50,96 @@ const JWT_SECRET = process.env.JWT_SECRET || "super-secret-key";
 
 // Database Setup
 let db: any;
-try {
-  db = new Database("database.db");
-  db.pragma("journal_mode = WAL");
-  db.pragma("foreign_keys = ON");
-} catch (e: any) {
-  console.warn("[Database] SQLite could not be initialized (expected on Vercel).");
-}
+let supabase: any;
+let useSupabase = false;
 
-// Supabase Setup
-let supabaseUrl = process.env.SUPABASE_URL || "";
-let supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "";
+async function initialize() {
+  db = await initDatabase();
 
-// Try to load from SQLite if not in env
-if (!supabaseUrl || !supabaseKey) {
-  try {
-    const dbUrl = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("supabase_url") as any;
-    const dbKey = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("supabase_service_role_key") as any;
-    const dbAnonKey = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("supabase_anon_key") as any;
-    
-    if (dbUrl?.value) supabaseUrl = dbUrl.value;
-    if (dbKey?.value) supabaseKey = dbKey.value;
-    else if (dbAnonKey?.value) supabaseKey = dbAnonKey.value;
-  } catch (e) {}
-}
+  // Supabase Setup
+  let supabaseUrl = process.env.SUPABASE_URL || "";
+  let supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "";
 
-const supabase = createClient(supabaseUrl, supabaseKey);
-const useSupabase = !!(supabaseUrl && supabaseKey);
-
-if (process.env.VERCEL && !useSupabase) {
-  console.warn("⚠️ [Vercel] Running on Vercel without Supabase! SQLite will NOT work on Vercel's ephemeral filesystem.");
-}
-
-if (useSupabase) {
-  console.log("[Database] Supabase connection initialized.");
-  // Check if users table is empty and seed admin
-  supabase.from('users').select('id', { count: 'exact', head: true }).then(async ({ count, error }) => {
-    if (error) {
-      console.error("[Database] Supabase users table check error:", error.message);
-    } else {
-      console.log(`[Database] Supabase users table has ${count} users.`);
+  // Try to load from SQLite if not in env
+  if (db && (!supabaseUrl || !supabaseKey)) {
+    try {
+      const dbUrl = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("supabase_url") as any;
+      const dbKey = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("supabase_service_role_key") as any;
+      const dbAnonKey = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("supabase_anon_key") as any;
       
-      // Ensure admin user exists in Supabase
-      const adminEmail = "lucas@solfus.com.br";
-      const { data: adminUser } = await supabase.from('users').select('*').eq('email', adminEmail).maybeSingle();
-      
-      const hashedPassword = bcrypt.hashSync("solfus123", 10);
-      
-      if (!adminUser) {
-        console.log(`[Database] Seeding admin user to Supabase: ${adminEmail}`);
-        await supabase.from('users').insert({
-          email: adminEmail,
-          password: hashedPassword,
-          name: "Lucas Solfus",
-          role: "admin"
-        });
+      if (dbUrl?.value) supabaseUrl = dbUrl.value;
+      if (dbKey?.value) supabaseKey = dbKey.value;
+      else if (dbAnonKey?.value) supabaseKey = dbAnonKey.value;
+    } catch (e) {}
+  }
+
+  supabase = createClient(supabaseUrl, supabaseKey);
+  useSupabase = !!(supabaseUrl && supabaseKey);
+
+  if (process.env.VERCEL && !useSupabase) {
+    console.warn("⚠️ [Vercel] Running on Vercel without Supabase! SQLite will NOT work on Vercel's ephemeral filesystem.");
+  }
+
+  if (useSupabase) {
+    console.log("[Database] Supabase connection initialized.");
+    // Check if users table is empty and seed admin
+    try {
+      const { count, error } = await supabase.from('users').select('id', { count: 'exact', head: true });
+      if (error) {
+        console.error("[Database] Supabase users table check error:", error.message);
       } else {
-        // ALWAYS ensure this user is admin
-        if (adminUser.role !== 'admin') {
-          console.log(`[Database] Updating user ${adminEmail} to admin role`);
-          await supabase.from('users').update({ role: 'admin' }).eq('email', adminEmail);
-        }
+        console.log(`[Database] Supabase users table has ${count} users.`);
         
-        // Optional: Update password if it's not a valid bcrypt hash (too short)
-        if (!adminUser.password || adminUser.password.length < 30) {
-          console.log(`[Database] Updating invalid password hash for admin in Supabase`);
-          await supabase.from('users').update({ password: hashedPassword }).eq('email', adminEmail);
+        // Ensure admin user exists in Supabase
+        const adminEmail = "lucas@solfus.com.br";
+        const { data: adminUser } = await supabase.from('users').select('*').eq('email', adminEmail).maybeSingle();
+        
+        const hashedPassword = bcrypt.hashSync("solfus123", 10);
+        
+        if (!adminUser) {
+          console.log(`[Database] Seeding admin user to Supabase: ${adminEmail}`);
+          await supabase.from('users').insert({
+            email: adminEmail,
+            password: hashedPassword,
+            name: "Lucas Solfus",
+            role: "admin"
+          });
+        } else {
+          // ALWAYS ensure this user is admin
+          if (adminUser.role !== 'admin') {
+            console.log(`[Database] Updating user ${adminEmail} to admin role`);
+            await supabase.from('users').update({ role: 'admin' }).eq('email', adminEmail);
+          }
+          
+          // Optional: Update password if it's not a valid bcrypt hash (too short)
+          if (!adminUser.password || adminUser.password.length < 30) {
+            console.log(`[Database] Updating invalid password hash for admin in Supabase`);
+            await supabase.from('users').update({ password: hashedPassword }).eq('email', adminEmail);
+          }
+        }
+
+        if (count === 0 && !adminUser) {
+          console.warn("[Database] Supabase users table was EMPTY. Admin user 'lucas@solfus.com.br' has been created with password 'solfus123'.");
         }
       }
-
-      if (count === 0 && !adminUser) {
-        console.warn("[Database] Supabase users table was EMPTY. Admin user 'lucas@solfus.com.br' has been created with password 'solfus123'.");
-      }
+    } catch (err: any) {
+      console.error("[Database] Supabase initialization error:", err.message);
     }
-  });
-} else {
-  console.log("[Database] Using local SQLite database.");
-}
+  } else {
+    console.log("[Database] Using local SQLite database.");
+  }
 
-// Initialize Tables
-if (db) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT UNIQUE,
-    password TEXT,
-    name TEXT,
-    role TEXT DEFAULT 'user',
-    signature TEXT -- Base64 image
-  );
+  // Initialize Tables
+  if (db) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT UNIQUE,
+      password TEXT,
+      name TEXT,
+      role TEXT DEFAULT 'user',
+      signature TEXT -- Base64 image
+    );
 
   CREATE TABLE IF NOT EXISTS companies (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -172,68 +192,73 @@ if (db) {
     uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(company_id) REFERENCES companies(id)
   );
-  `);
-}
+    `);
 
-// Migration: Ensure new columns exist
-if (db) {
-  try {
-    db.exec("ALTER TABLE users ADD COLUMN signature TEXT");
-  } catch (e) {}
-  try {
-    db.exec("ALTER TABLE companies ADD COLUMN manager_id INTEGER");
-  } catch (e) {}
+    // Migration: Ensure new columns exist
+    try {
+      db.exec("ALTER TABLE users ADD COLUMN signature TEXT");
+    } catch (e) {}
+    try {
+      db.exec("ALTER TABLE companies ADD COLUMN manager_id INTEGER");
+    } catch (e) {}
 
-  try {
-    db.exec("ALTER TABLE imported_files ADD COLUMN extracted_value TEXT");
-  } catch (e) {}
+    try {
+      db.exec("ALTER TABLE imported_files ADD COLUMN extracted_value TEXT");
+    } catch (e) {}
 
-  // Migration: Remove foreign key from oauth_tokens if it exists (by recreating table)
-  try {
-    const tableInfo = db.prepare("PRAGMA foreign_key_list(oauth_tokens)").all();
-    if (tableInfo.length > 0) {
-      console.log("Migrating oauth_tokens to remove foreign key constraint...");
-      db.exec(`
-        CREATE TABLE oauth_tokens_new (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          user_id INTEGER,
-          access_token TEXT,
-          refresh_token TEXT,
-          expires_at INTEGER,
-          last_auth_at INTEGER
-        );
-        INSERT INTO oauth_tokens_new (id, user_id, access_token, refresh_token, expires_at) 
-        SELECT id, user_id, access_token, refresh_token, expires_at FROM oauth_tokens;
-        DROP TABLE oauth_tokens;
-        ALTER TABLE oauth_tokens_new RENAME TO oauth_tokens;
-      `);
+    // Migration: Remove foreign key from oauth_tokens if it exists (by recreating table)
+    try {
+      const tableInfo = db.prepare("PRAGMA foreign_key_list(oauth_tokens)").all();
+      if (tableInfo.length > 0) {
+        console.log("Migrating oauth_tokens to remove foreign key constraint...");
+        db.exec(`
+          CREATE TABLE oauth_tokens_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            access_token TEXT,
+            refresh_token TEXT,
+            expires_at INTEGER,
+            last_auth_at INTEGER
+          );
+          INSERT INTO oauth_tokens_new (id, user_id, access_token, refresh_token, expires_at) 
+          SELECT id, user_id, access_token, refresh_token, expires_at FROM oauth_tokens;
+          DROP TABLE oauth_tokens;
+          ALTER TABLE oauth_tokens_new RENAME TO oauth_tokens;
+        `);
+      }
+    } catch (e) {
+      console.error("Migration error:", e);
     }
-  } catch (e) {
-    console.error("Migration error:", e);
+
+    try {
+      db.exec("ALTER TABLE oauth_tokens ADD COLUMN last_auth_at INTEGER");
+    } catch (e) {}
+
+    // Seed/Update Admin User
+    const hashedPassword = bcrypt.hashSync("solfus123", 10);
+    try {
+      const existingAdmin = db.prepare("SELECT * FROM users WHERE email = ?").get("lucas@solfus.com.br") as any;
+
+      if (!existingAdmin) {
+        db.prepare("INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)")
+          .run("lucas@solfus.com.br", hashedPassword, "Lucas Solfus", "admin");
+      } else {
+        db.prepare("UPDATE users SET role = 'admin' WHERE email = ?").run("lucas@solfus.com.br");
+      }
+
+      // Also ensure the old admin has the role if it exists, or just leave it
+      db.prepare("UPDATE users SET role = 'admin' WHERE email = 'admin@example.com'").run();
+    } catch (e) {}
   }
-
-  try {
-    db.exec("ALTER TABLE oauth_tokens ADD COLUMN last_auth_at INTEGER");
-  } catch (e) {}
 }
 
-// Seed/Update Admin User
-const hashedPassword = bcrypt.hashSync("solfus123", 10);
-if (db) {
-  try {
-    const existingAdmin = db.prepare("SELECT * FROM users WHERE email = ?").get("lucas@solfus.com.br") as any;
+const initPromise = initialize();
 
-    if (!existingAdmin) {
-      db.prepare("INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)")
-        .run("lucas@solfus.com.br", hashedPassword, "Lucas Solfus", "admin");
-    } else {
-      db.prepare("UPDATE users SET role = 'admin' WHERE email = ?").run("lucas@solfus.com.br");
-    }
-
-    // Also ensure the old admin has the role if it exists, or just leave it
-    db.prepare("UPDATE users SET role = 'admin' WHERE email = 'admin@example.com'").run();
-  } catch (e) {}
-}
+// Middleware to ensure DB is initialized
+app.use(async (req, res, next) => {
+  await initPromise;
+  next();
+});
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
@@ -1235,15 +1260,21 @@ async function setupVite() {
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static(path.join(__dirname, "dist")));
+    const distPath = path.join(__dirname, "dist");
+    console.log(`[Vite] Serving static files from: ${distPath}. Exists: ${fs.existsSync(distPath)}`);
+    app.use(express.static(distPath));
     app.get("*", (req, res) => {
-      res.sendFile(path.join(__dirname, "dist", "index.html"));
+      res.sendFile(path.join(distPath, "index.html"));
     });
   }
 }
 
 setupVite();
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-});
+if (!process.env.VERCEL) {
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
+
+export default app;
