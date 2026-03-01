@@ -18,7 +18,10 @@ export default function Settings() {
     clientSecret: '', 
     tenantId: 'common', 
     globalCc: '', 
-    redirectUri: '' 
+    redirectUri: '',
+    supabaseUrl: '',
+    supabaseAnonKey: '',
+    supabaseServiceRoleKey: ''
   });
   const [isSaving, setIsSaving] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
@@ -35,7 +38,10 @@ export default function Settings() {
         clientSecret: res.data.clientSecret,
         tenantId: res.data.tenantId || 'common',
         globalCc: res.data.globalCc || '',
-        redirectUri: res.data.redirectUri || `${window.location.origin}/auth/callback`
+        redirectUri: res.data.redirectUri || `${window.location.origin}/auth/callback`,
+        supabaseUrl: res.data.supabaseUrl || '',
+        supabaseAnonKey: res.data.supabaseAnonKey || '',
+        supabaseServiceRoleKey: res.data.supabaseServiceRoleKey || ''
       });
     } catch (err) {
       console.error(err);
@@ -85,6 +91,9 @@ export default function Settings() {
         </div>
         <form onSubmit={handleSaveCreds} className="p-6 space-y-6">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="md:col-span-2">
+              <h4 className="text-sm font-bold text-slate-900 border-b border-slate-100 pb-2 mb-4">Microsoft Azure</h4>
+            </div>
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1.5">Client ID</label>
               <input
@@ -132,6 +141,43 @@ export default function Settings() {
               </div>
               <p className="text-[10px] text-slate-500 mt-1">
                 * Este e-mail será incluído como cópia (CC) em todos os relatórios enviados pelo sistema.
+              </p>
+            </div>
+
+            <div className="md:col-span-2 mt-4">
+              <h4 className="text-sm font-bold text-slate-900 border-b border-slate-100 pb-2 mb-4">Supabase</h4>
+            </div>
+            <div className="md:col-span-2">
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">Supabase URL</label>
+              <input
+                type="text"
+                value={creds.supabaseUrl}
+                onChange={e => setCreds({ ...creds, supabaseUrl: e.target.value })}
+                placeholder="https://your-project.supabase.co"
+                className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none transition-all font-mono text-sm"
+              />
+            </div>
+            <div className="md:col-span-2">
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">Supabase Anon Key</label>
+              <input
+                type="password"
+                value={creds.supabaseAnonKey}
+                onChange={e => setCreds({ ...creds, supabaseAnonKey: e.target.value })}
+                placeholder="ey..."
+                className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none transition-all font-mono text-sm"
+              />
+            </div>
+            <div className="md:col-span-2">
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">Supabase Service Role Key (Recomendado para o Servidor)</label>
+              <input
+                type="password"
+                value={creds.supabaseServiceRoleKey}
+                onChange={e => setCreds({ ...creds, supabaseServiceRoleKey: e.target.value })}
+                placeholder="ey..."
+                className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none transition-all font-mono text-sm"
+              />
+              <p className="text-[10px] text-slate-500 mt-1">
+                * A Service Role Key permite que o servidor ignore as políticas de RLS. Mantenha em segredo!
               </p>
             </div>
           </div>

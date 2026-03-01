@@ -10,6 +10,7 @@ import AdmZip from "adm-zip";
 import axios from "axios";
 import { fileURLToPath } from "url";
 import { createRequire } from "module";
+import { createClient } from "@supabase/supabase-js";
 
 const require = createRequire(import.meta.url);
 const pdf = require("pdf-parse");
@@ -25,6 +26,66 @@ const JWT_SECRET = process.env.JWT_SECRET || "super-secret-key";
 const db = new Database("database.db");
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
+
+// Supabase Setup
+let supabaseUrl = process.env.SUPABASE_URL || "";
+let supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "";
+
+// Try to load from SQLite if not in env
+if (!supabaseUrl || !supabaseKey) {
+  try {
+    const dbUrl = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("supabase_url") as any;
+    const dbKey = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("supabase_service_role_key") as any;
+    const dbAnonKey = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("supabase_anon_key") as any;
+    
+    if (dbUrl?.value) supabaseUrl = dbUrl.value;
+    if (dbKey?.value) supabaseKey = dbKey.value;
+    else if (dbAnonKey?.value) supabaseKey = dbAnonKey.value;
+  } catch (e) {}
+}
+
+const supabase = createClient(supabaseUrl, supabaseKey);
+const useSupabase = !!(supabaseUrl && supabaseKey);
+
+if (useSupabase) {
+  console.log("[Database] Supabase connection initialized.");
+  // Check if users table is empty and seed admin
+  supabase.from('users').select('id', { count: 'exact', head: true }).then(async ({ count, error }) => {
+    if (error) {
+      console.error("[Database] Supabase users table check error:", error.message);
+    } else {
+      console.log(`[Database] Supabase users table has ${count} users.`);
+      
+      // Ensure admin user exists in Supabase
+      const adminEmail = "lucas@solfus.com.br";
+      const { data: adminUser } = await supabase.from('users').select('*').eq('email', adminEmail).maybeSingle();
+      
+      const hashedPassword = bcrypt.hashSync("solfus123", 10);
+      
+      if (!adminUser) {
+        console.log(`[Database] Seeding admin user to Supabase: ${adminEmail}`);
+        await supabase.from('users').insert({
+          email: adminEmail,
+          password: hashedPassword,
+          name: "Lucas Solfus",
+          role: "admin"
+        });
+      } else {
+        // Optional: Update password if it's not a valid bcrypt hash (too short)
+        if (!adminUser.password || adminUser.password.length < 30) {
+          console.log(`[Database] Updating invalid password hash for admin in Supabase`);
+          await supabase.from('users').update({ password: hashedPassword }).eq('email', adminEmail);
+        }
+      }
+
+      if (count === 0 && !adminUser) {
+        console.warn("[Database] Supabase users table was EMPTY. Admin user 'lucas@solfus.com.br' has been created with password 'solfus123'.");
+      }
+    }
+  });
+} else {
+  console.log("[Database] Using local SQLite database.");
+}
 
 // Initialize Tables
 db.exec(`
@@ -148,15 +209,40 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Auth Middleware
-const authenticate = (req: any, res: any, next: any) => {
+const authenticate = async (req: any, res: any, next: any) => {
   const token = req.headers.authorization?.split(" ")[1];
   if (!token) return res.status(401).json({ error: "Unauthorized" });
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET) as any;
-    req.user = decoded;
-    next();
-  } catch (err) {
-    res.status(401).json({ error: "Invalid token" });
+
+  if (useSupabase) {
+    try {
+      const { data: { user }, error } = await supabase.auth.getUser(token);
+      if (error || !user) return res.status(401).json({ error: "Invalid token" });
+      
+      // Fetch additional user data (role, signature) from public.users
+      const { data: userData } = await supabase
+        .from('users')
+        .select('id, email, name, role, signature')
+        .eq('email', user.email)
+        .maybeSingle();
+      
+      req.user = { 
+        id: userData?.id || user.id, 
+        email: user.email, 
+        role: userData?.role || 'user',
+        name: userData?.name || user.user_metadata?.full_name
+      };
+      next();
+    } catch (err) {
+      res.status(401).json({ error: "Invalid token" });
+    }
+  } else {
+    try {
+      const decoded = jwt.verify(token, JWT_SECRET) as any;
+      req.user = decoded;
+      next();
+    } catch (err) {
+      res.status(401).json({ error: "Invalid token" });
+    }
   }
 };
 
@@ -170,7 +256,19 @@ const isAdmin = (req: any, res: any, next: any) => {
 // --- OAuth Helpers ---
 
 async function getValidToken(userId: number) {
-  const tokenRecord = db.prepare("SELECT * FROM oauth_tokens WHERE user_id = ?").get(userId) as any;
+  let tokenRecord: any = null;
+
+  if (useSupabase) {
+    const { data } = await supabase
+      .from('oauth_tokens')
+      .select('*')
+      .eq('user_id', userId)
+      .single();
+    tokenRecord = data;
+  } else {
+    tokenRecord = db.prepare("SELECT * FROM oauth_tokens WHERE user_id = ?").get(userId) as any;
+  }
+
   if (!tokenRecord) return null;
 
   // Check if the connection is older than 60 days
@@ -214,8 +312,19 @@ async function getValidToken(userId: number) {
     const { access_token, refresh_token, expires_in } = response.data;
     const expires_at = Date.now() + expires_in * 1000;
 
-    db.prepare("UPDATE oauth_tokens SET access_token = ?, refresh_token = ?, expires_at = ? WHERE user_id = ?")
-      .run(access_token, refresh_token || tokenRecord.refresh_token, expires_at, userId);
+    if (useSupabase) {
+      await supabase
+        .from('oauth_tokens')
+        .update({ 
+          access_token, 
+          refresh_token: refresh_token || tokenRecord.refresh_token, 
+          expires_at 
+        })
+        .eq('user_id', userId);
+    } else {
+      db.prepare("UPDATE oauth_tokens SET access_token = ?, refresh_token = ?, expires_at = ? WHERE user_id = ?")
+        .run(access_token, refresh_token || tokenRecord.refresh_token, expires_at, userId);
+    }
 
     return access_token;
   } catch (err: any) {
@@ -227,40 +336,112 @@ async function getValidToken(userId: number) {
 // --- API Routes ---
 
 // Auth
-app.post("/api/auth/login", (req, res) => {
-  const { email, password } = req.body;
-  const user = db.prepare("SELECT * FROM users WHERE email = ?").get(email) as any;
-  if (!user || !bcrypt.compareSync(password, user.password)) {
-    return res.status(401).json({ error: "Credenciais inválidas" });
+app.post("/api/auth/login", async (req, res) => {
+  const { email: rawEmail, password } = req.body;
+  const email = rawEmail?.trim();
+  
+  if (useSupabase) {
+    console.log(`[Auth] Attempting Supabase Auth login for: "${email}"`);
+    try {
+      // Authenticate using Supabase Auth service
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (error) {
+        console.error("[Supabase Auth] Login Error:", error.message);
+        return res.status(401).json({ error: "Credenciais inválidas no Supabase Auth" });
+      }
+
+      // Get additional metadata from public.users table
+      const { data: userData } = await supabase
+        .from('users')
+        .select('*')
+        .eq('email', email)
+        .maybeSingle();
+
+      const userResponse = {
+        id: userData?.id || data.user.id,
+        email: data.user.email,
+        name: userData?.name || data.user.user_metadata?.full_name || "Usuário",
+        role: userData?.role || 'user'
+      };
+
+      console.log(`[Auth] Supabase Auth login successful for: ${email}`);
+      res.json({ 
+        token: data.session?.access_token, 
+        user: userResponse 
+      });
+    } catch (err: any) {
+      console.error("[Supabase Auth] Exception:", err.message);
+      res.status(500).json({ error: "Erro interno na autenticação" });
+    }
+  } else {
+    console.log(`[Auth] Attempting SQLite login for: ${email}`);
+    const user = db.prepare("SELECT * FROM users WHERE email = ?").get(email) as any;
+    
+    if (!user || !bcrypt.compareSync(password, user.password)) {
+      console.log(`[Auth] Login failed for ${email}. User found: ${!!user}`);
+      return res.status(401).json({ error: "Credenciais inválidas" });
+    }
+    const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: "24h" });
+    res.json({ token, user: { id: user.id, email: user.email, name: user.name, role: user.role } });
   }
-  const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: "24h" });
-  res.json({ token, user: { id: user.id, email: user.email, name: user.name, role: user.role } });
 });
 
 // User Management
-app.get("/api/users/me", authenticate, (req: any, res) => {
-  const user = db.prepare("SELECT id, email, name, role, signature FROM users WHERE id = ?").get(req.user.id);
+app.get("/api/users/me", authenticate, async (req: any, res) => {
+  let user: any = null;
+  if (useSupabase) {
+    const { data } = await supabase.from('users').select('id, email, name, role, signature').eq('id', req.user.id).single();
+    user = data;
+  } else {
+    user = db.prepare("SELECT id, email, name, role, signature FROM users WHERE id = ?").get(req.user.id);
+  }
   res.json(user);
 });
 
-app.post("/api/users/signature", authenticate, (req: any, res) => {
+app.post("/api/users/signature", authenticate, async (req: any, res) => {
   const { signature } = req.body;
-  db.prepare("UPDATE users SET signature = ? WHERE id = ?").run(signature, req.user.id);
+  if (useSupabase) {
+    await supabase.from('users').update({ signature }).eq('id', req.user.id);
+  } else {
+    db.prepare("UPDATE users SET signature = ? WHERE id = ?").run(signature, req.user.id);
+  }
   res.json({ success: true });
 });
 
-app.get("/api/users", authenticate, isAdmin, (req, res) => {
-  const users = db.prepare("SELECT id, email, name, role, signature FROM users").all();
+app.get("/api/users", authenticate, isAdmin, async (req, res) => {
+  let users: any[] = [];
+  if (useSupabase) {
+    const { data } = await supabase.from('users').select('id, email, name, role, signature');
+    users = data || [];
+  } else {
+    users = db.prepare("SELECT id, email, name, role, signature FROM users").all();
+  }
   res.json(users);
 });
 
-app.post("/api/users", authenticate, isAdmin, (req, res) => {
+app.post("/api/users", authenticate, isAdmin, async (req, res) => {
   const { email, password, name, role, signature } = req.body;
   try {
     const hashedPassword = bcrypt.hashSync(password, 10);
-    const result = db.prepare("INSERT INTO users (email, password, name, role, signature) VALUES (?, ?, ?, ?, ?)")
-      .run(email, hashedPassword, name, role || 'user', signature || null);
-    res.json({ id: result.lastInsertRowid });
+    if (useSupabase) {
+      const { data, error } = await supabase.from('users').insert({
+        email,
+        password: hashedPassword,
+        name,
+        role: role || 'user',
+        signature: signature || null
+      }).select().single();
+      if (error) throw error;
+      res.json({ id: data.id });
+    } else {
+      const result = db.prepare("INSERT INTO users (email, password, name, role, signature) VALUES (?, ?, ?, ?, ?)")
+        .run(email, hashedPassword, name, role || 'user', signature || null);
+      res.json({ id: result.lastInsertRowid });
+    }
   } catch (err: any) {
     res.status(400).json({ error: "E-mail já cadastrado ou dados inválidos" });
   }
@@ -318,21 +499,46 @@ app.delete("/api/users/:id", authenticate, isAdmin, (req: any, res) => {
 });
 
 // Companies
-app.get("/api/companies", authenticate, (req, res) => {
-  const companies = db.prepare(`
-    SELECT c.*, u.name as manager_name 
-    FROM companies c 
-    LEFT JOIN users u ON c.manager_id = u.id
-  `).all();
-  res.json(companies.map((c: any) => ({ ...c, emails: JSON.parse(c.emails || "[]") })));
+app.get("/api/companies", authenticate, async (req, res) => {
+  let companies: any[] = [];
+  if (useSupabase) {
+    const { data } = await supabase
+      .from('companies')
+      .select('*, manager:users(name)');
+    companies = (data || []).map((c: any) => ({
+      ...c,
+      manager_name: c.manager?.name,
+      emails: c.emails || []
+    }));
+  } else {
+    const rows = db.prepare(`
+      SELECT c.*, u.name as manager_name 
+      FROM companies c 
+      LEFT JOIN users u ON c.manager_id = u.id
+    `).all();
+    companies = rows.map((c: any) => ({ ...c, emails: JSON.parse(c.emails || "[]") }));
+  }
+  res.json(companies);
 });
 
-app.post("/api/companies", authenticate, (req, res) => {
+app.post("/api/companies", authenticate, async (req, res) => {
   const { razao_social, nome_fantasia, cnpj, emails, manager_id } = req.body;
   try {
-    const result = db.prepare("INSERT INTO companies (razao_social, nome_fantasia, cnpj, emails, manager_id) VALUES (?, ?, ?, ?, ?)")
-      .run(razao_social, nome_fantasia, cnpj, JSON.stringify(emails), manager_id || null);
-    res.json({ id: result.lastInsertRowid });
+    if (useSupabase) {
+      const { data, error } = await supabase.from('companies').insert({
+        razao_social,
+        nome_fantasia,
+        cnpj,
+        emails: emails || [],
+        manager_id: manager_id || null
+      }).select().single();
+      if (error) throw error;
+      res.json({ id: data.id });
+    } else {
+      const result = db.prepare("INSERT INTO companies (razao_social, nome_fantasia, cnpj, emails, manager_id) VALUES (?, ?, ?, ?, ?)")
+        .run(razao_social, nome_fantasia, cnpj, JSON.stringify(emails), manager_id || null);
+      res.json({ id: result.lastInsertRowid });
+    }
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }
@@ -351,16 +557,27 @@ app.delete("/api/companies/:id", authenticate, (req, res) => {
 });
 
 // Templates
-app.get("/api/templates", authenticate, (req, res) => {
-  const templates = db.prepare("SELECT * FROM templates").all();
+app.get("/api/templates", authenticate, async (req, res) => {
+  let templates: any[] = [];
+  if (useSupabase) {
+    const { data } = await supabase.from('templates').select('*');
+    templates = data || [];
+  } else {
+    templates = db.prepare("SELECT * FROM templates").all();
+  }
   res.json(templates);
 });
 
-app.post("/api/templates", authenticate, (req, res) => {
+app.post("/api/templates", authenticate, async (req, res) => {
   const { name, subject, body } = req.body;
-  const result = db.prepare("INSERT INTO templates (name, subject, body) VALUES (?, ?, ?)")
-    .run(name, subject, body);
-  res.json({ id: result.lastInsertRowid });
+  if (useSupabase) {
+    const { data } = await supabase.from('templates').insert({ name, subject, body }).select().single();
+    res.json({ id: data.id });
+  } else {
+    const result = db.prepare("INSERT INTO templates (name, subject, body) VALUES (?, ?, ?)")
+      .run(name, subject, body);
+    res.json({ id: result.lastInsertRowid });
+  }
 });
 
 app.put("/api/templates/:id", authenticate, (req, res) => {
@@ -422,6 +639,9 @@ app.get("/api/settings/microsoft", authenticate, (req, res) => {
   const clientSecret = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("microsoft_client_secret") as any;
   const tenantId = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("microsoft_tenant_id") as any;
   const globalCc = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("global_cc_email") as any;
+  const supabaseUrl = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("supabase_url") as any;
+  const supabaseAnonKey = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("supabase_anon_key") as any;
+  const supabaseServiceRoleKey = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("supabase_service_role_key") as any;
   
   const redirectUri = getRedirectUri(req);
 
@@ -430,28 +650,62 @@ app.get("/api/settings/microsoft", authenticate, (req, res) => {
     clientSecret: clientSecret?.value ? "********" : (process.env.MICROSOFT_CLIENT_SECRET ? "********" : ""),
     tenantId: tenantId?.value || process.env.MICROSOFT_TENANT_ID || "common",
     globalCc: globalCc?.value || "",
+    supabaseUrl: supabaseUrl?.value || process.env.SUPABASE_URL || "",
+    supabaseAnonKey: supabaseAnonKey?.value || process.env.SUPABASE_ANON_KEY || "",
+    supabaseServiceRoleKey: supabaseServiceRoleKey?.value ? "********" : (process.env.SUPABASE_SERVICE_ROLE_KEY ? "********" : ""),
     hasSecret: !!(clientSecret?.value || process.env.MICROSOFT_CLIENT_SECRET),
     redirectUri: redirectUri
   });
 });
 
-app.post("/api/settings/microsoft", authenticate, isAdmin, (req, res) => {
-  const { clientId, clientSecret, tenantId, globalCc } = req.body;
+app.post("/api/settings/microsoft", authenticate, isAdmin, async (req, res) => {
+  const { clientId, clientSecret, tenantId, globalCc, supabaseUrl, supabaseAnonKey, supabaseServiceRoleKey } = req.body;
+  console.log(`[Settings] Updating settings. TenantId: ${tenantId}`);
   
+  const updates = [];
+
   if (clientId !== undefined) {
     db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("microsoft_client_id", clientId);
+    if (useSupabase) updates.push({ key: "microsoft_client_id", value: clientId });
   }
   
   if (clientSecret !== undefined && clientSecret !== "********") {
     db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("microsoft_client_secret", clientSecret);
+    if (useSupabase) updates.push({ key: "microsoft_client_secret", value: clientSecret });
   }
 
   if (tenantId !== undefined) {
+    console.log(`[Settings] Saving Tenant ID: ${tenantId}`);
     db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("microsoft_tenant_id", tenantId);
+    if (useSupabase) updates.push({ key: "microsoft_tenant_id", value: tenantId });
   }
 
   if (globalCc !== undefined) {
     db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("global_cc_email", globalCc);
+    if (useSupabase) updates.push({ key: "global_cc_email", value: globalCc });
+  }
+
+  if (supabaseUrl !== undefined) {
+    db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("supabase_url", supabaseUrl);
+    if (useSupabase) updates.push({ key: "supabase_url", value: supabaseUrl });
+  }
+
+  if (supabaseAnonKey !== undefined) {
+    db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("supabase_anon_key", supabaseAnonKey);
+    if (useSupabase) updates.push({ key: "supabase_anon_key", value: supabaseAnonKey });
+  }
+
+  if (supabaseServiceRoleKey !== undefined && supabaseServiceRoleKey !== "********") {
+    db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("supabase_service_role_key", supabaseServiceRoleKey);
+    if (useSupabase) updates.push({ key: "supabase_service_role_key", value: supabaseServiceRoleKey });
+  }
+
+  if (useSupabase && updates.length > 0) {
+    try {
+      await supabase.from('app_settings').upsert(updates);
+    } catch (e) {
+      console.error("[Settings] Error mirroring to Supabase:", e);
+    }
   }
   
   res.json({ success: true });
@@ -527,9 +781,20 @@ app.post("/api/auth/microsoft/callback", authenticate, async (req: any, res) => 
     const last_auth_at = Date.now();
     const userId = req.user.id;
 
-    db.prepare("DELETE FROM oauth_tokens WHERE user_id = ?").run(userId);
-    db.prepare("INSERT INTO oauth_tokens (user_id, access_token, refresh_token, expires_at, last_auth_at) VALUES (?, ?, ?, ?, ?)")
-      .run(userId, access_token, refresh_token, expires_at, last_auth_at);
+    if (useSupabase) {
+      await supabase.from('oauth_tokens').delete().eq('user_id', userId);
+      await supabase.from('oauth_tokens').insert({
+        user_id: userId,
+        access_token,
+        refresh_token,
+        expires_at,
+        last_auth_at
+      });
+    } else {
+      db.prepare("DELETE FROM oauth_tokens WHERE user_id = ?").run(userId);
+      db.prepare("INSERT INTO oauth_tokens (user_id, access_token, refresh_token, expires_at, last_auth_at) VALUES (?, ?, ?, ?, ?)")
+        .run(userId, access_token, refresh_token, expires_at, last_auth_at);
+    }
 
     console.log(`[OAuth] Token exchange successful for user ${userId}`);
     res.json({ success: true });
@@ -544,8 +809,42 @@ app.post("/api/auth/microsoft/callback", authenticate, async (req: any, res) => 
 });
 
 app.get("/api/auth/microsoft/status", authenticate, async (req: any, res) => {
-  const token = await getValidToken(req.user.id);
-  res.json({ connected: !!token });
+  try {
+    const token = await getValidToken(req.user.id);
+    console.log(`[OAuth Status] User ${req.user.id} connected: ${!!token}`);
+    res.json({ connected: !!token });
+  } catch (err: any) {
+    console.error(`[OAuth Status] Error checking status for user ${req.user.id}:`, err.message);
+    res.json({ connected: false, error: err.message });
+  }
+});
+
+app.post("/api/auth/microsoft/test-email", authenticate, async (req: any, res) => {
+  const accessToken = await getValidToken(req.user.id);
+  if (!accessToken) return res.status(400).json({ error: "Não conectado" });
+
+  try {
+    const message = {
+      message: {
+        subject: "Teste de Conexão RelEasy",
+        body: {
+          contentType: "Text",
+          content: "Sua conexão com o Microsoft Graph está funcionando corretamente!",
+        },
+        toRecipients: [{ emailAddress: { address: req.user.email } }],
+      },
+    };
+
+    await axios.post("https://graph.microsoft.com/v1.0/me/sendMail", message, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+
+    res.json({ success: true });
+  } catch (err: any) {
+    const errorMsg = err.response?.data?.error?.message || err.message;
+    console.error("[OAuth Test] Error sending test email:", errorMsg);
+    res.status(500).json({ error: errorMsg });
+  }
 });
 
 // --- PDF Extraction Helper ---
@@ -594,9 +893,14 @@ app.post("/api/upload/zip", authenticate, upload.single("file"), async (req, res
   try {
     const zip = new AdmZip(req.file.buffer);
     const entries = zip.getEntries();
-    const companies = db.prepare("SELECT * FROM companies").all() as any[];
-
-    const insertFile = db.prepare("INSERT INTO imported_files (file_name, content, company_id, extracted_value) VALUES (?, ?, ?, ?)");
+    let companies: any[] = [];
+    
+    if (useSupabase) {
+      const { data } = await supabase.from('companies').select('*');
+      companies = data || [];
+    } else {
+      companies = db.prepare("SELECT * FROM companies").all() as any[];
+    }
 
     for (const entry of entries) {
       if (entry.isDirectory || !entry.entryName.toLowerCase().endsWith(".pdf")) continue;
@@ -605,9 +909,9 @@ app.post("/api/upload/zip", authenticate, upload.single("file"), async (req, res
       const fileNameLower = fileName.toLowerCase();
       
       const matchedCompany = companies.find(c => {
-        const cnpjClean = c.cnpj.replace(/\D/g, '');
-        const nomeFantasiaLower = c.nome_fantasia.toLowerCase();
-        const razaoSocialLower = c.razao_social.toLowerCase();
+        const cnpjClean = (c.cnpj || '').replace(/\D/g, '');
+        const nomeFantasiaLower = (c.nome_fantasia || '').toLowerCase();
+        const razaoSocialLower = (c.razao_social || '').toLowerCase();
         
         return (cnpjClean && fileName.includes(cnpjClean)) || 
                (nomeFantasiaLower && fileNameLower.includes(nomeFantasiaLower)) ||
@@ -615,10 +919,21 @@ app.post("/api/upload/zip", authenticate, upload.single("file"), async (req, res
       });
 
       const buffer = zip.readFile(entry);
+      if (!buffer) continue;
       const content = buffer.toString("base64");
       const extractedValue = await extractValorALiquidar(buffer);
       
-      insertFile.run(fileName, content, matchedCompany?.id || null, extractedValue);
+      if (useSupabase) {
+        await supabase.from('imported_files').insert({
+          file_name: fileName,
+          content,
+          company_id: matchedCompany?.id || null,
+          extracted_value: extractedValue
+        });
+      } else {
+        db.prepare("INSERT INTO imported_files (file_name, content, company_id, extracted_value) VALUES (?, ?, ?, ?)")
+          .run(fileName, content, matchedCompany?.id || null, extractedValue);
+      }
     }
 
     res.json({ success: true });
@@ -638,44 +953,73 @@ app.post("/api/pdf/extract", authenticate, upload.single("file"), async (req, re
   }
 });
 
-app.get("/api/imported-files", authenticate, (req, res) => {
-  const files = db.prepare(`
-    SELECT f.*, c.nome_fantasia as company_name 
-    FROM imported_files f 
-    LEFT JOIN companies c ON f.company_id = c.id
-    ORDER BY f.uploaded_at DESC
-  `).all();
+app.get("/api/imported-files", authenticate, async (req, res) => {
+  let files: any[] = [];
+  if (useSupabase) {
+    const { data } = await supabase
+      .from('imported_files')
+      .select('*, company:companies(nome_fantasia)');
+    files = (data || []).map((f: any) => ({
+      ...f,
+      company_name: f.company?.nome_fantasia
+    }));
+  } else {
+    files = db.prepare(`
+      SELECT f.*, c.nome_fantasia as company_name 
+      FROM imported_files f 
+      LEFT JOIN companies c ON f.company_id = c.id
+      ORDER BY f.uploaded_at DESC
+    `).all();
+  }
   res.json(files);
 });
 
-app.delete("/api/imported-files-clear", authenticate, (req, res) => {
+app.delete("/api/imported-files-clear", authenticate, async (req, res) => {
   console.log("[Files] Clearing all imported files...");
   try {
-    const result = db.prepare("DELETE FROM imported_files").run();
-    console.log(`[Files] Deleted ${result.changes} files.`);
-    res.json({ success: true, deleted: result.changes });
+    if (useSupabase) {
+      const { error, count } = await supabase.from('imported_files').delete().neq('id', 0);
+      res.json({ success: true, deleted: count });
+    } else {
+      const result = db.prepare("DELETE FROM imported_files").run();
+      console.log(`[Files] Deleted ${result.changes} files.`);
+      res.json({ success: true, deleted: result.changes });
+    }
   } catch (err: any) {
     console.error("[Files] Error clearing files:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-app.delete("/api/imported-files-batch", authenticate, (req, res) => {
+app.post("/api/imported-files-batch-delete", authenticate, async (req, res) => {
   const { ids } = req.body;
+  console.log(`[Files] Batch delete requested for IDs:`, ids);
   if (!Array.isArray(ids) || ids.length === 0) {
     return res.status(400).json({ error: "IDs inválidos" });
   }
   try {
-    const placeholders = ids.map(() => "?").join(",");
-    db.prepare(`DELETE FROM imported_files WHERE id IN (${placeholders})`).run(...ids);
-    res.json({ success: true });
+    if (useSupabase) {
+      const { error } = await supabase.from('imported_files').delete().in('id', ids);
+      if (error) throw error;
+      res.json({ success: true });
+    } else {
+      const placeholders = ids.map(() => "?").join(",");
+      const result = db.prepare(`DELETE FROM imported_files WHERE id IN (${placeholders})`).run(...ids);
+      console.log(`[Files] Batch delete successful. Deleted ${result.changes} rows.`);
+      res.json({ success: true, deleted: result.changes });
+    }
   } catch (err: any) {
+    console.error(`[Files] Batch delete error:`, err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-app.delete("/api/imported-files/:id", authenticate, (req, res) => {
-  db.prepare("DELETE FROM imported_files WHERE id = ?").run(req.params.id);
+app.delete("/api/imported-files/:id", authenticate, async (req, res) => {
+  if (useSupabase) {
+    await supabase.from('imported_files').delete().eq('id', req.params.id);
+  } else {
+    db.prepare("DELETE FROM imported_files WHERE id = ?").run(req.params.id);
+  }
   res.json({ success: true });
 });
 
@@ -687,23 +1031,43 @@ app.post("/api/reports/send", authenticate, async (req: any, res) => {
   const accessToken = await getValidToken(req.user.id);
   if (!accessToken) return res.status(400).json({ error: "Sua conta Microsoft não está conectada. Conecte-a em seu perfil." });
 
-  const template = db.prepare("SELECT * FROM templates WHERE id = ?").get(templateId) as any;
+  let template: any = null;
+  let globalCc: string | null = null;
+  let currentUser: any = null;
+
+  if (useSupabase) {
+    const { data: t } = await supabase.from('templates').select('*').eq('id', templateId).single();
+    template = t;
+    const { data: s } = await supabase.from('app_settings').select('value').eq('key', 'global_cc_email').single();
+    globalCc = s?.value;
+    const { data: u } = await supabase.from('users').select('signature').eq('id', req.user.id).single();
+    currentUser = u;
+  } else {
+    template = db.prepare("SELECT * FROM templates WHERE id = ?").get(templateId) as any;
+    const globalCcRecord = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("global_cc_email") as any;
+    globalCc = globalCcRecord?.value;
+    currentUser = db.prepare("SELECT signature FROM users WHERE id = ?").get(req.user.id) as any;
+  }
+
   if (!template) return res.status(404).json({ error: "Modelo não encontrado" });
 
-  const globalCcRecord = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("global_cc_email") as any;
-  const globalCc = globalCcRecord?.value;
-
-  const currentUser = db.prepare("SELECT signature FROM users WHERE id = ?").get(req.user.id) as any;
   const finalSignatureHtml = currentUser?.signature ? `<br><br><img src="${currentUser.signature}" style="max-width: 300px; height: auto;">` : "";
   
   const results = [];
 
   for (const item of items) {
     try {
-      const company = db.prepare("SELECT * FROM companies WHERE id = ?").get(item.companyId) as any;
+      let company: any = null;
+      if (useSupabase) {
+        const { data } = await supabase.from('companies').select('*').eq('id', item.companyId).single();
+        company = data;
+      } else {
+        company = db.prepare("SELECT * FROM companies WHERE id = ?").get(item.companyId) as any;
+      }
+
       if (!company) throw new Error(`Empresa ${item.companyId} não encontrada`);
 
-      const emails = JSON.parse(company.emails || "[]");
+      const emails = useSupabase ? (company.emails || []) : JSON.parse(company.emails || "[]");
       if (emails.length === 0) throw new Error("Nenhum e-mail cadastrado para esta empresa");
 
       let subject = template.subject;
@@ -769,15 +1133,33 @@ app.post("/api/reports/send", authenticate, async (req: any, res) => {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
 
-      db.prepare("INSERT INTO sending_logs (company_id, template_id, status) VALUES (?, ?, ?)")
-        .run(company.id, templateId, "success");
+      if (useSupabase) {
+        await supabase.from('sending_logs').insert({
+          company_id: company.id,
+          template_id: templateId,
+          status: "success"
+        });
+      } else {
+        db.prepare("INSERT INTO sending_logs (company_id, template_id, status) VALUES (?, ?, ?)")
+          .run(company.id, templateId, "success");
+      }
       
       results.push({ companyId: company.id, status: "success" });
     } catch (err: any) {
       const errorMsg = err.response?.data?.error?.message || err.message;
       console.error(`[Send Report] Error for company ${item.companyId}:`, errorMsg);
-      db.prepare("INSERT INTO sending_logs (company_id, template_id, status, error_message) VALUES (?, ?, ?, ?)")
-        .run(item.companyId, templateId, "error", errorMsg);
+      
+      if (useSupabase) {
+        await supabase.from('sending_logs').insert({
+          company_id: item.companyId,
+          template_id: templateId,
+          status: "error",
+          error_message: errorMsg
+        });
+      } else {
+        db.prepare("INSERT INTO sending_logs (company_id, template_id, status, error_message) VALUES (?, ?, ?, ?)")
+          .run(item.companyId, templateId, "error", errorMsg);
+      }
       results.push({ companyId: item.companyId, status: "error", error: errorMsg });
     }
   }

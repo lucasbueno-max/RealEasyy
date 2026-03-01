@@ -66,7 +66,7 @@ export default function ImportFiles() {
     
     setIsClearing(true);
     try {
-      await api.delete('/imported-files-batch', { data: { ids: selectedIds } });
+      await api.post('/imported-files-batch-delete', { ids: selectedIds });
       setFiles(prev => prev.filter(f => !selectedIds.includes(f.id)));
       setSelectedIds([]);
       setMessage({ type: 'success', text: 'Arquivos selecionados foram removidos.' });

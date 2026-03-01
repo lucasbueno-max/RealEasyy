@@ -145,6 +145,26 @@ export default function Profile() {
                 {isConnected ? 'Reconectar Conta' : 'Conectar Agora'}
               </button>
             </div>
+            {isConnected && (
+              <button
+                onClick={async () => {
+                  setIsLoading(true);
+                  try {
+                    await api.post('/auth/microsoft/test-email');
+                    setMessage({ type: 'success', text: 'E-mail de teste enviado com sucesso! Verifique sua caixa de entrada.' });
+                  } catch (err: any) {
+                    setMessage({ type: 'error', text: err.response?.data?.error || 'Erro ao enviar e-mail de teste.' });
+                  } finally {
+                    setIsLoading(false);
+                  }
+                }}
+                disabled={isLoading}
+                className="w-full py-2 bg-slate-100 text-slate-700 rounded-lg text-xs font-bold hover:bg-slate-200 transition-colors flex items-center justify-center gap-2"
+              >
+                {isLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Mail className="w-3 h-3" />}
+                Enviar E-mail de Teste
+              </button>
+            )}
             <p className="text-xs text-slate-500 italic">
               * Ao conectar, você permitirá que o sistema envie e-mails em seu nome usando a Microsoft Graph API.
             </p>
