@@ -7,11 +7,11 @@
     "node": ">=18.17.0"
   },
   "scripts": {
-    "dev": "tsx server.ts",
-    "build": "vite build",
-    "preview": "vite preview",
-    "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
+    "dev": "vite",
+  "build": "vite build",
+  "preview": "vite preview",
+  "start": "node dist/server.js",
+  "lint": "eslint ."
   },
   "dependencies": {
     "@google/genai": "^1.29.0",
