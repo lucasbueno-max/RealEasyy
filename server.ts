@@ -219,17 +219,21 @@ if (db) {
 
 // Seed/Update Admin User
 const hashedPassword = bcrypt.hashSync("solfus123", 10);
-const existingAdmin = db.prepare("SELECT * FROM users WHERE email = ?").get("lucas@solfus.com.br") as any;
+if (db) {
+  try {
+    const existingAdmin = db.prepare("SELECT * FROM users WHERE email = ?").get("lucas@solfus.com.br") as any;
 
-if (!existingAdmin) {
-  db.prepare("INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)")
-    .run("lucas@solfus.com.br", hashedPassword, "Lucas Solfus", "admin");
-} else {
-  db.prepare("UPDATE users SET role = 'admin' WHERE email = ?").run("lucas@solfus.com.br");
+    if (!existingAdmin) {
+      db.prepare("INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)")
+        .run("lucas@solfus.com.br", hashedPassword, "Lucas Solfus", "admin");
+    } else {
+      db.prepare("UPDATE users SET role = 'admin' WHERE email = ?").run("lucas@solfus.com.br");
+    }
+
+    // Also ensure the old admin has the role if it exists, or just leave it
+    db.prepare("UPDATE users SET role = 'admin' WHERE email = 'admin@example.com'").run();
+  } catch (e) {}
 }
-
-// Also ensure the old admin has the role if it exists, or just leave it
-db.prepare("UPDATE users SET role = 'admin' WHERE email = 'admin@example.com'").run();
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));

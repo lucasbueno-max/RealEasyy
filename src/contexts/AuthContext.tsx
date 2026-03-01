@@ -17,6 +17,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const storedUser = localStorage.getItem('user');
     if (storedUser) setUser(JSON.parse(storedUser));
+
+    // Refresh user data from API to get latest role/name
+    const refreshToken = localStorage.getItem('token');
+    if (refreshToken) {
+      import('../services/api').then(m => {
+        const api = m.default;
+        api.get('/users/me').then(res => {
+          setUser(res.data);
+          localStorage.setItem('user', JSON.stringify(res.data));
+        }).catch(() => {
+          // If token is invalid, logout
+          logout();
+        });
+      });
+    }
   }, []);
 
   const login = (newToken: string, newUser: any) => {
