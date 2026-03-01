@@ -13,7 +13,14 @@ import { createRequire } from "module";
 import { createClient } from "@supabase/supabase-js";
 
 const require = createRequire(import.meta.url);
-const pdf = require("pdf-parse");
+let pdf: any;
+try {
+  const pdfImport = require("pdf-parse");
+  pdf = typeof pdfImport === 'function' ? pdfImport : (pdfImport.default || pdfImport);
+  console.log("[PDF] Library loaded successfully. Type:", typeof pdf);
+} catch (e: any) {
+  console.error("[PDF] Failed to load pdf-parse library:", e.message);
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -247,6 +254,7 @@ const authenticate = async (req: any, res: any, next: any) => {
 };
 
 const isAdmin = (req: any, res: any, next: any) => {
+  console.log(`[Auth] Checking admin role for ${req.user?.email}. Current Role: ${req.user?.role}`);
   if (req.user?.role !== 'admin') {
     return res.status(403).json({ error: "Acesso negado. Apenas administradores." });
   }
@@ -737,13 +745,24 @@ app.get("/api/auth/microsoft/url", (req, res) => {
   }
 });
 
+const usedCodes = new Set<string>();
+
 app.post("/api/auth/microsoft/callback", authenticate, async (req: any, res) => {
   const { code } = req.body;
-  console.log("[OAuth] Callback received with code:", code ? "YES" : "NO");
+  console.log("[OAuth] Callback received with code:", code ? code.substring(0, 10) + "..." : "NO");
 
   if (!code) {
     return res.status(400).json({ error: "Código de autorização ausente" });
   }
+
+  if (usedCodes.has(code)) {
+    console.warn("[OAuth] Code already being processed or redeemed:", code.substring(0, 10) + "...");
+    return res.status(400).json({ error: "Este código já foi utilizado ou está em processamento." });
+  }
+  
+  usedCodes.add(code);
+  // Clean up code after 1 minute to prevent memory leak
+  setTimeout(() => usedCodes.delete(code), 60000);
   
   const dbClientId = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("microsoft_client_id") as any;
   const dbClientSecret = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("microsoft_client_secret") as any;
@@ -850,6 +869,10 @@ app.post("/api/auth/microsoft/test-email", authenticate, async (req: any, res) =
 // --- PDF Extraction Helper ---
 async function extractValorALiquidar(buffer: Buffer): Promise<string | null> {
   try {
+    if (typeof pdf !== 'function') {
+      console.error("[PDF Extraction] Error: 'pdf' is not a function. Type is:", typeof pdf);
+      return null;
+    }
     const data = await pdf(buffer);
     const text = data.text;
     

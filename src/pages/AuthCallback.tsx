@@ -6,8 +6,11 @@ import { AlertCircle, Loader2 } from 'lucide-react';
 export default function AuthCallback() {
   const location = useLocation();
   const [error, setError] = useState<string | null>(null);
+  const exchangedRef = React.useRef(false);
 
   useEffect(() => {
+    if (exchangedRef.current) return;
+
     const params = new URLSearchParams(location.search);
     const code = params.get('code');
     const errorParam = params.get('error');
@@ -20,6 +23,7 @@ export default function AuthCallback() {
     }
 
     if (code) {
+      exchangedRef.current = true;
       console.log('[OAuth Callback] Exchanging code for tokens...');
       api.post('/auth/microsoft/callback', { code })
         .then(() => {
