@@ -13,15 +13,18 @@ import {
 } from 'lucide-react';
 
 export default function Profile() {
-  const { user } = useAuth();
+  const { user, login } = useAuth();
   const [isConnected, setIsConnected] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [isSavingName, setIsSavingName] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
   const [signature, setSignature] = useState<string | null>(null);
+  const [name, setName] = useState(user?.name || '');
 
   useEffect(() => {
     checkStatus();
     fetchProfile();
+    if (user?.name) setName(user.name);
 
     const handleMessage = (event: MessageEvent) => {
       if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
@@ -47,8 +50,28 @@ export default function Profile() {
     try {
       const res = await api.get('/users/me');
       setSignature(res.data.signature);
+      setName(res.data.name);
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  const handleUpdateName = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSavingName(true);
+    setMessage(null);
+    try {
+      await api.put('/users/me', { name });
+      // Update local auth context
+      const token = localStorage.getItem('token');
+      if (token) {
+        login(token, { ...user, name });
+      }
+      setMessage({ type: 'success', text: 'Nome atualizado com sucesso!' });
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err.response?.data?.error || 'Erro ao atualizar nome.' });
+    } finally {
+      setIsSavingName(false);
     }
   };
 
@@ -207,33 +230,52 @@ export default function Profile() {
         </div>
       </div>
 
-      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
-        <div className="p-6 border-b border-slate-100 flex items-center gap-4">
-          <div className="bg-orange-50 p-3 rounded-xl text-orange-600">
-            <User className="w-6 h-6" />
+        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+          <div className="p-6 border-b border-slate-100 flex items-center gap-4">
+            <div className="bg-orange-50 p-3 rounded-xl text-orange-600">
+              <User className="w-6 h-6" />
+            </div>
+            <div>
+              <h3 className="font-bold text-slate-900">Informações da Conta</h3>
+              <p className="text-sm text-slate-500">Seus dados básicos de acesso.</p>
+            </div>
           </div>
-          <div>
-            <h3 className="font-bold text-slate-900">Informações da Conta</h3>
-            <p className="text-sm text-slate-500">Seus dados básicos de acesso.</p>
+          <div className="p-6 space-y-6">
+            <form onSubmit={handleUpdateName} className="grid grid-cols-1 md:grid-cols-2 gap-6 items-end">
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1.5">Nome Completo</label>
+                <input
+                  type="text"
+                  value={name}
+                  onChange={e => setName(e.target.value)}
+                  className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none transition-all text-sm font-medium"
+                />
+              </div>
+              <div>
+                <button
+                  type="submit"
+                  disabled={isSavingName}
+                  className="bg-slate-900 text-white px-6 py-2 rounded-xl text-sm font-bold hover:bg-slate-800 transition-colors flex items-center gap-2 disabled:opacity-50 h-[42px]"
+                >
+                  {isSavingName ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+                  Salvar Nome
+                </button>
+              </div>
+            </form>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-4 border-t border-slate-50">
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">E-mail de Acesso</label>
+                <p className="text-slate-900 font-medium">{user?.email}</p>
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Nível de Acesso</label>
+                <span className="inline-block px-2 py-1 rounded bg-slate-100 text-slate-700 text-[10px] font-bold uppercase">
+                  {user?.role === 'admin' ? 'Administrador' : 'Usuário'}
+                </span>
+              </div>
+            </div>
           </div>
         </div>
-        <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div>
-            <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Nome Completo</label>
-            <p className="text-slate-900 font-medium">{user?.name}</p>
-          </div>
-          <div>
-            <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">E-mail de Acesso</label>
-            <p className="text-slate-900 font-medium">{user?.email}</p>
-          </div>
-          <div>
-            <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Nível de Acesso</label>
-            <span className="inline-block px-2 py-1 rounded bg-slate-100 text-slate-700 text-[10px] font-bold uppercase">
-              {user?.role === 'admin' ? 'Administrador' : 'Usuário'}
-            </span>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }

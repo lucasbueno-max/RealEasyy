@@ -54,6 +54,10 @@ if (!supabaseUrl || !supabaseKey) {
 const supabase = createClient(supabaseUrl, supabaseKey);
 const useSupabase = !!(supabaseUrl && supabaseKey);
 
+if (process.env.VERCEL && !useSupabase) {
+  console.warn("⚠️ [Vercel] Running on Vercel without Supabase! SQLite will NOT work on Vercel's ephemeral filesystem.");
+}
+
 if (useSupabase) {
   console.log("[Database] Supabase connection initialized.");
   // Check if users table is empty and seed admin
@@ -78,6 +82,12 @@ if (useSupabase) {
           role: "admin"
         });
       } else {
+        // ALWAYS ensure this user is admin
+        if (adminUser.role !== 'admin') {
+          console.log(`[Database] Updating user ${adminEmail} to admin role`);
+          await supabase.from('users').update({ role: 'admin' }).eq('email', adminEmail);
+        }
+        
         // Optional: Update password if it's not a valid bcrypt hash (too short)
         if (!adminUser.password || adminUser.password.length < 30) {
           console.log(`[Database] Updating invalid password hash for admin in Supabase`);
@@ -402,12 +412,25 @@ app.post("/api/auth/login", async (req, res) => {
 app.get("/api/users/me", authenticate, async (req: any, res) => {
   let user: any = null;
   if (useSupabase) {
-    const { data } = await supabase.from('users').select('id, email, name, role, signature').eq('id', req.user.id).single();
+    const { data } = await supabase.from('users').select('id, email, name, role, signature').eq('id', req.user.id).maybeSingle();
     user = data;
   } else {
     user = db.prepare("SELECT id, email, name, role, signature FROM users WHERE id = ?").get(req.user.id);
   }
   res.json(user);
+});
+
+app.put("/api/users/me", authenticate, async (req: any, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: "Nome é obrigatório" });
+
+  if (useSupabase) {
+    const { error } = await supabase.from('users').update({ name }).eq('id', req.user.id);
+    if (error) return res.status(500).json({ error: error.message });
+  } else {
+    db.prepare("UPDATE users SET name = ? WHERE id = ?").run(name, req.user.id);
+  }
+  res.json({ success: true });
 });
 
 app.post("/api/users/signature", authenticate, async (req: any, res) => {
