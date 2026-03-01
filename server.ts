@@ -30,9 +30,14 @@ const PORT = 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "super-secret-key";
 
 // Database Setup
-const db = new Database("database.db");
-db.pragma("journal_mode = WAL");
-db.pragma("foreign_keys = ON");
+let db: any;
+try {
+  db = new Database("database.db");
+  db.pragma("journal_mode = WAL");
+  db.pragma("foreign_keys = ON");
+} catch (e: any) {
+  console.warn("[Database] SQLite could not be initialized (expected on Vercel).");
+}
 
 // Supabase Setup
 let supabaseUrl = process.env.SUPABASE_URL || "";
@@ -105,8 +110,9 @@ if (useSupabase) {
 }
 
 // Initialize Tables
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
+if (db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT UNIQUE,
     password TEXT,
@@ -166,47 +172,50 @@ db.exec(`
     uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(company_id) REFERENCES companies(id)
   );
-`);
-
-// Migration: Ensure new columns exist
-try {
-  db.exec("ALTER TABLE users ADD COLUMN signature TEXT");
-} catch (e) {}
-try {
-  db.exec("ALTER TABLE companies ADD COLUMN manager_id INTEGER");
-} catch (e) {}
-
-try {
-  db.exec("ALTER TABLE imported_files ADD COLUMN extracted_value TEXT");
-} catch (e) {}
-
-// Migration: Remove foreign key from oauth_tokens if it exists (by recreating table)
-try {
-  const tableInfo = db.prepare("PRAGMA foreign_key_list(oauth_tokens)").all();
-  if (tableInfo.length > 0) {
-    console.log("Migrating oauth_tokens to remove foreign key constraint...");
-    db.exec(`
-      CREATE TABLE oauth_tokens_new (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        access_token TEXT,
-        refresh_token TEXT,
-        expires_at INTEGER,
-        last_auth_at INTEGER
-      );
-      INSERT INTO oauth_tokens_new (id, user_id, access_token, refresh_token, expires_at) 
-      SELECT id, user_id, access_token, refresh_token, expires_at FROM oauth_tokens;
-      DROP TABLE oauth_tokens;
-      ALTER TABLE oauth_tokens_new RENAME TO oauth_tokens;
-    `);
-  }
-} catch (e) {
-  console.error("Migration error:", e);
+  `);
 }
 
-try {
-  db.exec("ALTER TABLE oauth_tokens ADD COLUMN last_auth_at INTEGER");
-} catch (e) {}
+// Migration: Ensure new columns exist
+if (db) {
+  try {
+    db.exec("ALTER TABLE users ADD COLUMN signature TEXT");
+  } catch (e) {}
+  try {
+    db.exec("ALTER TABLE companies ADD COLUMN manager_id INTEGER");
+  } catch (e) {}
+
+  try {
+    db.exec("ALTER TABLE imported_files ADD COLUMN extracted_value TEXT");
+  } catch (e) {}
+
+  // Migration: Remove foreign key from oauth_tokens if it exists (by recreating table)
+  try {
+    const tableInfo = db.prepare("PRAGMA foreign_key_list(oauth_tokens)").all();
+    if (tableInfo.length > 0) {
+      console.log("Migrating oauth_tokens to remove foreign key constraint...");
+      db.exec(`
+        CREATE TABLE oauth_tokens_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER,
+          access_token TEXT,
+          refresh_token TEXT,
+          expires_at INTEGER,
+          last_auth_at INTEGER
+        );
+        INSERT INTO oauth_tokens_new (id, user_id, access_token, refresh_token, expires_at) 
+        SELECT id, user_id, access_token, refresh_token, expires_at FROM oauth_tokens;
+        DROP TABLE oauth_tokens;
+        ALTER TABLE oauth_tokens_new RENAME TO oauth_tokens;
+      `);
+    }
+  } catch (e) {
+    console.error("Migration error:", e);
+  }
+
+  try {
+    db.exec("ALTER TABLE oauth_tokens ADD COLUMN last_auth_at INTEGER");
+  } catch (e) {}
+}
 
 // Seed/Update Admin User
 const hashedPassword = bcrypt.hashSync("solfus123", 10);
@@ -1214,18 +1223,22 @@ app.post("/api/reports/send", authenticate, async (req: any, res) => {
 });
 
 // Vite Middleware
-if (process.env.NODE_ENV !== "production") {
-  const vite = await createViteServer({
-    server: { middlewareMode: true },
-    appType: "spa",
-  });
-  app.use(vite.middlewares);
-} else {
-  app.use(express.static(path.join(__dirname, "dist")));
-  app.get("*", (req, res) => {
-    res.sendFile(path.join(__dirname, "dist", "index.html"));
-  });
+async function setupVite() {
+  if (process.env.NODE_ENV !== "production") {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+  } else {
+    app.use(express.static(path.join(__dirname, "dist")));
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(__dirname, "dist", "index.html"));
+    });
+  }
 }
+
+setupVite();
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on http://localhost:${PORT}`);
