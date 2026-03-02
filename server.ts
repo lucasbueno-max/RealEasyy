@@ -1264,11 +1264,25 @@ async function setupVite() {
       console.warn("[Vite] Failed to load Vite middleware:", e.message);
     }
   } else {
-    const distPath = path.join(__dirname, "dist");
-    console.log(`[Vite] Serving static files from: ${distPath}. Exists: ${fs.existsSync(distPath)}`);
-    app.use(express.static(distPath));
+    const distPath = path.join(process.cwd(), "dist");
+    const fallbackPath = path.join(__dirname, "dist");
+    const finalPath = fs.existsSync(distPath) ? distPath : fallbackPath;
+    
+    console.log(`[Vite] Current working directory: ${process.cwd()}`);
+    console.log(`[Vite] __dirname: ${__dirname}`);
+    try {
+      console.log(`[Vite] Files in cwd: ${fs.readdirSync(process.cwd()).join(", ")}`);
+    } catch (e) {}
+    
+    console.log(`[Vite] Serving static files from: ${finalPath}. Exists: ${fs.existsSync(finalPath)}`);
+    app.use(express.static(finalPath));
     app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
+      const indexPath = path.join(finalPath, "index.html");
+      if (fs.existsSync(indexPath)) {
+        res.sendFile(indexPath);
+      } else {
+        res.status(404).send("Frontend build not found. Please run 'npm run build' first.");
+      }
     });
   }
 }
