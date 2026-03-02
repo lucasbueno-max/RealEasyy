@@ -297,8 +297,28 @@ app.use(async (req, res, next) => {
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Helper to get settings from Supabase or SQLite
+// Helper to get settings from Supabase or SQLite with Environment Variable fallback
 async function getSetting(key: string) {
+  // 1. Check Environment Variables first (highest priority)
+  const envKey = key.toUpperCase();
+  if (process.env[envKey]) return process.env[envKey];
+  
+  // Special mapping for keys that don't match 1:1 with env vars
+  const envMapping: Record<string, string> = {
+    "microsoft_client_id": "MICROSOFT_CLIENT_ID",
+    "microsoft_client_secret": "MICROSOFT_CLIENT_SECRET",
+    "microsoft_tenant_id": "MICROSOFT_TENANT_ID",
+    "supabase_url": "SUPABASE_URL",
+    "supabase_anon_key": "SUPABASE_ANON_KEY",
+    "supabase_service_role_key": "SUPABASE_SERVICE_ROLE_KEY",
+    "global_cc_email": "GLOBAL_CC_EMAIL"
+  };
+  
+  if (envMapping[key] && process.env[envMapping[key]]) {
+    return process.env[envMapping[key]];
+  }
+
+  // 2. Check Supabase if initialized
   if (useSupabase) {
     try {
       const { data, error } = await supabase.from('app_settings').select('value').eq('key', key).maybeSingle();
@@ -308,6 +328,7 @@ async function getSetting(key: string) {
     }
   }
   
+  // 3. Check SQLite if available
   if (db) {
     try {
       const row = db.prepare("SELECT value FROM app_settings WHERE key = ?").get(key) as any;
@@ -795,25 +816,29 @@ app.get("/api/billing-control", authenticate, async (req, res) => {
   try {
     let controls: any[] = [];
     if (useSupabase) {
-      const { data } = await supabase
+      // Fetch billing controls and companies separately to avoid complex join issues if FKs aren't perfect
+      const { data: billingData } = await supabase
         .from('billing_controls')
-        .select('*, company:companies(nome_fantasia), sent_by:users!billing_sent_by(name), issued_by:users!nf_issued_by(name)')
+        .select('*')
         .eq('month', month);
       
       const { data: companies } = await supabase.from('companies').select('id, nome_fantasia');
+      const { data: users } = await supabase.from('users').select('id, name');
+      
+      const userMap = new Map((users || []).map(u => [u.id, u.name]));
       
       controls = (companies || []).map(c => {
-        const control = (data || []).find(d => d.company_id === c.id);
+        const control = (billingData || []).find(d => d.company_id === c.id);
         return {
           company_id: c.id,
           company_name: c.nome_fantasia,
           month,
-          billing_sent: control?.billing_sent || false,
+          billing_sent: !!control?.billing_sent,
           billing_sent_at: control?.billing_sent_at,
-          billing_sent_by_name: control?.sent_by?.name,
-          nf_issued: control?.nf_issued || false,
+          billing_sent_by_name: control?.billing_sent_by_name || (control?.billing_sent_by ? userMap.get(control.billing_sent_by) : null),
+          nf_issued: !!control?.nf_issued,
           nf_issued_at: control?.nf_issued_at,
-          nf_issued_by_name: control?.issued_by?.name,
+          nf_issued_by_name: control?.nf_issued_by_name || (control?.nf_issued_by ? userMap.get(control.nf_issued_by) : null),
         };
       });
     } else if (db) {
@@ -865,12 +890,19 @@ app.post("/api/billing-control/toggle", authenticate, async (req: any, res) => {
         .maybeSingle();
 
       const newValue = !current?.[field];
+      
+      // Get user name
+      let userName = "Usuário";
+      const { data: u } = await supabase.from('users').select('name').eq('id', userId).maybeSingle();
+      if (u) userName = u.name;
+
       const updates: any = {
         company_id,
         month,
         [field]: newValue,
         [`${field}_at`]: newValue ? now : null,
-        [`${field}_by`]: newValue ? userId : null
+        [`${field}_by`]: newValue ? userId : null,
+        [`${field}_by_name`]: newValue ? userName : null
       };
 
       const { error } = await supabase.from('billing_controls').upsert(updates);
@@ -879,11 +911,23 @@ app.post("/api/billing-control/toggle", authenticate, async (req: any, res) => {
       // History
       if (newValue) {
         const action = field === 'billing_sent' ? 'Faturamento Enviado' : 'NF Emitida';
+        
+        // Get user name for history
+        let userName = "Usuário";
+        if (useSupabase) {
+          const { data: u } = await supabase.from('users').select('name').eq('id', userId).maybeSingle();
+          if (u) userName = u.name;
+        } else if (db) {
+          const u = db.prepare("SELECT name FROM users WHERE id = ?").get(userId) as any;
+          if (u) userName = u.name;
+        }
+
         await supabase.from('billing_history').insert({
           company_id,
           month,
           action,
-          user_id: userId
+          user_id: userId,
+          user_name: userName
         });
       }
     } else if (db) {
@@ -892,19 +936,30 @@ app.post("/api/billing-control/toggle", authenticate, async (req: any, res) => {
       
       const atField = `${field}_at`;
       const byField = `${field}_by`;
+      const byNameField = `${field}_by_name`;
+
+      // Get user name
+      const u = db.prepare("SELECT name FROM users WHERE id = ?").get(userId) as any;
+      const userName = u?.name || "Usuário";
 
       db.prepare(`
-        INSERT INTO billing_controls (company_id, month, ${field}, ${atField}, ${byField})
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO billing_controls (company_id, month, ${field}, ${atField}, ${byField}, ${byNameField})
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(company_id, month) DO UPDATE SET
           ${field} = excluded.${field},
           ${atField} = excluded.${atField},
-          ${byField} = excluded.${byField}
-      `).run(company_id, month, newValue, newValue ? now : null, newValue ? userId : null);
+          ${byField} = excluded.${byField},
+          ${byNameField} = excluded.${byNameField}
+      `).run(company_id, month, newValue, newValue ? now : null, newValue ? userId : null, newValue ? userName : null);
 
       if (newValue) {
         const action = field === 'billing_sent' ? 'Faturamento Enviado' : 'NF Emitida';
-        db.prepare("INSERT INTO billing_history (company_id, month, action, user_id) VALUES (?, ?, ?, ?)").run(company_id, month, action, userId);
+        
+        // Get user name for history
+        const u = db.prepare("SELECT name FROM users WHERE id = ?").get(userId) as any;
+        const userName = u?.name || "Usuário";
+
+        db.prepare("INSERT INTO billing_history (company_id, month, action, user_id, user_name) VALUES (?, ?, ?, ?, ?)").run(company_id, month, action, userId, userName);
       }
     }
     res.json({ success: true });
@@ -920,15 +975,21 @@ app.get("/api/billing-control/history", authenticate, async (req, res) => {
     if (useSupabase) {
       const { data } = await supabase
         .from('billing_history')
-        .select('*, user:users(name), company:companies(nome_fantasia)')
+        .select('*')
         .eq('company_id', company_id)
         .eq('month', month)
         .order('created_at', { ascending: false });
       
+      const { data: users } = await supabase.from('users').select('id, name');
+      const userMap = new Map((users || []).map(u => [u.id, u.name]));
+      
+      const { data: companies } = await supabase.from('companies').select('id, nome_fantasia');
+      const companyMap = new Map((companies || []).map(c => [c.id, c.nome_fantasia]));
+
       history = (data || []).map(h => ({
         ...h,
-        user_name: h.user?.name,
-        company_name: h.company?.nome_fantasia
+        user_name: h.user_name || (h.user_id ? userMap.get(h.user_id) : "Usuário"),
+        company_name: h.company_name || (h.company_id ? companyMap.get(h.company_id) : "Empresa")
       }));
     } else if (db) {
       history = db.prepare(`
@@ -1063,53 +1124,69 @@ app.post("/api/settings/microsoft", authenticate, async (req, res) => {
   const { clientId, clientSecret, tenantId, globalCc, supabaseUrl, supabaseAnonKey, supabaseServiceRoleKey } = req.body;
   console.log(`[Settings] Updating settings. TenantId: ${tenantId}`);
   
-  const updates = [];
+  try {
+    const updates = [];
 
-  if (clientId !== undefined) {
-    if (db) db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("microsoft_client_id", clientId);
-    if (useSupabase) updates.push({ key: "microsoft_client_id", value: clientId });
-  }
-  
-  if (clientSecret !== undefined && clientSecret !== "********") {
-    if (db) db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("microsoft_client_secret", clientSecret);
-    if (useSupabase) updates.push({ key: "microsoft_client_secret", value: clientSecret });
-  }
-
-  if (tenantId !== undefined) {
-    console.log(`[Settings] Saving Tenant ID: ${tenantId}`);
-    if (db) db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("microsoft_tenant_id", tenantId);
-    if (useSupabase) updates.push({ key: "microsoft_tenant_id", value: tenantId });
-  }
-
-  if (globalCc !== undefined) {
-    if (db) db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("global_cc_email", globalCc);
-    if (useSupabase) updates.push({ key: "global_cc_email", value: globalCc });
-  }
-
-  if (supabaseUrl !== undefined) {
-    if (db) db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("supabase_url", supabaseUrl);
-    if (useSupabase) updates.push({ key: "supabase_url", value: supabaseUrl });
-  }
-
-  if (supabaseAnonKey !== undefined) {
-    if (db) db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("supabase_anon_key", supabaseAnonKey);
-    if (useSupabase) updates.push({ key: "supabase_anon_key", value: supabaseAnonKey });
-  }
-
-  if (supabaseServiceRoleKey !== undefined && supabaseServiceRoleKey !== "********") {
-    if (db) db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("supabase_service_role_key", supabaseServiceRoleKey);
-    if (useSupabase) updates.push({ key: "supabase_service_role_key", value: supabaseServiceRoleKey });
-  }
-
-  if (useSupabase && updates.length > 0) {
-    try {
-      await supabase.from('app_settings').upsert(updates);
-    } catch (e) {
-      console.error("[Settings] Error mirroring to Supabase:", e);
+    if (clientId !== undefined) {
+      if (db) db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("microsoft_client_id", clientId);
+      updates.push({ key: "microsoft_client_id", value: clientId });
     }
+    
+    if (clientSecret !== undefined && clientSecret !== "********") {
+      if (db) db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("microsoft_client_secret", clientSecret);
+      updates.push({ key: "microsoft_client_secret", value: clientSecret });
+    }
+
+    if (tenantId !== undefined) {
+      if (db) db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("microsoft_tenant_id", tenantId);
+      updates.push({ key: "microsoft_tenant_id", value: tenantId });
+    }
+
+    if (globalCc !== undefined) {
+      if (db) db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("global_cc_email", globalCc);
+      updates.push({ key: "global_cc_email", value: globalCc });
+    }
+
+    if (supabaseUrl !== undefined) {
+      if (db) db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("supabase_url", supabaseUrl);
+      updates.push({ key: "supabase_url", value: supabaseUrl });
+    }
+
+    if (supabaseAnonKey !== undefined) {
+      if (db) db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("supabase_anon_key", supabaseAnonKey);
+      updates.push({ key: "supabase_anon_key", value: supabaseAnonKey });
+    }
+
+    if (supabaseServiceRoleKey !== undefined && supabaseServiceRoleKey !== "********") {
+      if (db) db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("supabase_service_role_key", supabaseServiceRoleKey);
+      updates.push({ key: "supabase_service_role_key", value: supabaseServiceRoleKey });
+    }
+
+    // Try to initialize Supabase if we have new credentials or if it's not initialized yet
+    const sUrl = supabaseUrl || await getSetting("supabase_url");
+    const sKey = supabaseServiceRoleKey || await getSetting("supabase_service_role_key") || supabaseAnonKey || await getSetting("supabase_anon_key");
+
+    if (sUrl && sKey && (!useSupabase || sUrl !== (await getSetting("supabase_url")))) {
+      try {
+        supabase = createClient(sUrl, sKey);
+        useSupabase = true;
+        console.log("[Settings] Supabase initialized/updated from settings.");
+      } catch (e) {
+        console.error("[Settings] Failed to re-initialize Supabase:", e);
+      }
+    }
+
+    if (useSupabase && updates.length > 0) {
+      const { error } = await supabase.from('app_settings').upsert(updates);
+      if (error) throw error;
+      console.log("[Settings] Successfully updated Supabase settings.");
+    }
+
+    res.json({ success: true });
+  } catch (err: any) {
+    console.error("[Settings] Error saving settings:", err);
+    res.status(500).json({ error: err.message });
   }
-  
-  res.json({ success: true });
 });
 
 // --- Microsoft Graph OAuth ---
@@ -1120,7 +1197,8 @@ app.get("/api/auth/microsoft/url", async (req, res) => {
     const tenantId = await getSetting("microsoft_tenant_id") || "common";
     
     if (!clientId) {
-      return res.status(400).json({ error: "Microsoft Client ID não configurado. Salve-o primeiro." });
+      console.error("[OAuth] Microsoft Client ID not found in settings or env");
+      return res.status(400).json({ error: "Microsoft Client ID não configurado. Salve-o primeiro nas configurações." });
     }
 
     const redirectUri = getRedirectUri(req);
