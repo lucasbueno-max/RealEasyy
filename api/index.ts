@@ -46,7 +46,22 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = 3000;
-const JWT_SECRET = process.env.JWT_SECRET || "super-secret-key";
+let JWT_SECRET = process.env.JWT_SECRET || "super-secret-key";
+
+async function getJwtSecret() {
+  const stored = await getSetting("jwt_secret");
+  if (stored) {
+    JWT_SECRET = stored;
+    return;
+  }
+  
+  // If not stored, use env or default, and store it if we have a DB
+  if (db) {
+    try {
+      db.prepare("INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?)").run("jwt_secret", JWT_SECRET);
+    } catch (e) {}
+  }
+}
 
 // Database Setup
 let db: any;
@@ -55,6 +70,7 @@ let useSupabase = false;
 
 async function initialize() {
   db = await initDatabase();
+  await getJwtSecret();
 
   // Supabase Setup
   let supabaseUrl = process.env.SUPABASE_URL || "";
@@ -77,12 +93,13 @@ async function initialize() {
     try {
       supabase = createClient(supabaseUrl, supabaseKey);
       useSupabase = true;
-      console.log("Supabase initialized and will be used as primary database.");
-    } catch (e) {
-      console.error("Failed to initialize Supabase client:", e);
+      console.log(`[Database] Supabase initialized. URL: ${supabaseUrl}`);
+    } catch (e: any) {
+      console.error("[Database] Failed to initialize Supabase client:", e.message);
       useSupabase = false;
     }
   } else {
+    console.log("[Database] Supabase credentials missing. Using SQLite.");
     useSupabase = false;
   }
 
@@ -352,10 +369,12 @@ const authenticate = async (req: any, res: any, next: any) => {
   }
 
   // Try Supabase first if enabled
-  if (useSupabase) {
+  if (useSupabase && supabase) {
     try {
       const { data: { user }, error } = await supabase.auth.getUser(token);
-      if (!error && user) {
+      if (error) {
+        console.warn(`[Auth] Supabase token verification failed for ${token.substring(0, 10)}...: ${error.message}`);
+      } else if (user) {
         // Fetch additional user data from public.users
         const { data: userData } = await supabase
           .from('users')
@@ -371,9 +390,9 @@ const authenticate = async (req: any, res: any, next: any) => {
         };
         return next();
       }
-      console.log("[Auth] Supabase token verification failed, trying local JWT fallback...");
-    } catch (err) {
-      console.warn("[Auth] Supabase auth error:", err);
+      console.log("[Auth] Supabase auth failed or no user, trying local JWT fallback...");
+    } catch (err: any) {
+      console.warn("[Auth] Supabase auth exception:", err.message);
     }
   }
 
@@ -382,9 +401,9 @@ const authenticate = async (req: any, res: any, next: any) => {
     const decoded = jwt.verify(token, JWT_SECRET) as any;
     req.user = decoded;
     next();
-  } catch (err) {
-    console.error("[Auth] All authentication methods failed for token");
-    res.status(401).json({ error: "Invalid token" });
+  } catch (err: any) {
+    console.error(`[Auth] Local JWT verification failed: ${err.message}`);
+    res.status(401).json({ error: "Sessão inválida ou expirada. Por favor, faça login novamente." });
   }
 };
 
