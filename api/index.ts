@@ -22,7 +22,8 @@ async function initDatabase() {
   try {
     const sqlite = await import("better-sqlite3");
     Database = sqlite.default;
-    const db = new Database("database.db");
+    const dbPath = path.join(process.cwd(), "database.db");
+    const db = new Database(dbPath);
     db.pragma("journal_mode = WAL");
     db.pragma("foreign_keys = ON");
     return db;
@@ -282,7 +283,7 @@ const authenticate = async (req: any, res: any, next: any) => {
       req.user = { 
         id: userData?.id || user.id, 
         email: user.email, 
-        role: userData?.role || 'user',
+        role: (user.email === 'lucas@solfus.com.br' || user.email === 'admin@example.com') ? 'admin' : (userData?.role || 'user'),
         name: userData?.name || user.user_metadata?.full_name
       };
       next();
@@ -420,7 +421,7 @@ app.post("/api/auth/login", async (req, res) => {
         id: userData?.id || data.user.id,
         email: data.user.email,
         name: userData?.name || data.user.user_metadata?.full_name || "Usuário",
-        role: userData?.role || 'user'
+        role: (email === 'lucas@solfus.com.br' || email === 'admin@example.com') ? 'admin' : (userData?.role || 'user')
       };
 
       console.log(`[Auth] Supabase Auth login successful for: ${email}`);
@@ -454,6 +455,11 @@ app.get("/api/users/me", authenticate, async (req: any, res) => {
   } else {
     user = db.prepare("SELECT id, email, name, role, signature FROM users WHERE id = ?").get(req.user.id);
   }
+  
+  if (user && (user.email === 'lucas@solfus.com.br' || user.email === 'admin@example.com')) {
+    user.role = 'admin';
+  }
+  
   res.json(user);
 });
 
@@ -1252,7 +1258,12 @@ app.post("/api/reports/send", authenticate, async (req: any, res) => {
 
 // Vite Middleware
 async function setupVite() {
-  if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
+  if (process.env.VERCEL) {
+    console.log("[Vite] Running on Vercel, static files handled by vercel.json rewrites.");
+    return;
+  }
+
+  if (process.env.NODE_ENV !== "production") {
     try {
       const { createServer: createViteServer } = await import("vite");
       const vite = await createViteServer({
@@ -1265,16 +1276,10 @@ async function setupVite() {
     }
   } else {
     const distPath = path.join(process.cwd(), "dist");
-    const fallbackPath = path.join(__dirname, "dist");
+    const fallbackPath = path.join(__dirname, "..", "dist");
     const finalPath = fs.existsSync(distPath) ? distPath : fallbackPath;
     
-    console.log(`[Vite] Current working directory: ${process.cwd()}`);
-    console.log(`[Vite] __dirname: ${__dirname}`);
-    try {
-      console.log(`[Vite] Files in cwd: ${fs.readdirSync(process.cwd()).join(", ")}`);
-    } catch (e) {}
-    
-    console.log(`[Vite] Serving static files from: ${finalPath}. Exists: ${fs.existsSync(finalPath)}`);
+    console.log(`[Vite] Serving static files from: ${finalPath}`);
     app.use(express.static(finalPath));
     app.get("*", (req, res) => {
       const indexPath = path.join(finalPath, "index.html");
