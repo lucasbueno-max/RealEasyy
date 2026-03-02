@@ -73,8 +73,18 @@ async function initialize() {
     } catch (e) {}
   }
 
-  supabase = createClient(supabaseUrl, supabaseKey);
-  useSupabase = !!(supabaseUrl && supabaseKey);
+  if (supabaseUrl && supabaseKey) {
+    try {
+      supabase = createClient(supabaseUrl, supabaseKey);
+      useSupabase = true;
+      console.log("Supabase initialized and will be used as primary database.");
+    } catch (e) {
+      console.error("Failed to initialize Supabase client:", e);
+      useSupabase = false;
+    }
+  } else {
+    useSupabase = false;
+  }
 
   if (process.env.VERCEL && !useSupabase) {
     console.warn("⚠️ [Vercel] Running on Vercel without Supabase! SQLite will NOT work on Vercel's ephemeral filesystem.");
@@ -375,9 +385,9 @@ async function getValidToken(userId: number) {
       .from('oauth_tokens')
       .select('*')
       .eq('user_id', userId)
-      .single();
+      .maybeSingle();
     tokenRecord = data;
-  } else {
+  } else if (db) {
     tokenRecord = db.prepare("SELECT * FROM oauth_tokens WHERE user_id = ?").get(userId) as any;
   }
 
@@ -397,13 +407,9 @@ async function getValidToken(userId: number) {
 
   console.log(`[OAuth] Token expired for user ${userId}. Refreshing...`);
 
-  const dbClientId = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("microsoft_client_id") as any;
-  const dbClientSecret = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("microsoft_client_secret") as any;
-  const dbTenantId = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("microsoft_tenant_id") as any;
-  
-  const clientId = dbClientId?.value || process.env.MICROSOFT_CLIENT_ID;
-  const clientSecret = dbClientSecret?.value || process.env.MICROSOFT_CLIENT_SECRET;
-  const tenantId = dbTenantId?.value || process.env.MICROSOFT_TENANT_ID || "common";
+  const clientId = await getSetting("microsoft_client_id");
+  const clientSecret = await getSetting("microsoft_client_secret");
+  const tenantId = await getSetting("microsoft_tenant_id") || "common";
 
   if (!clientId || !clientSecret || !tokenRecord.refresh_token) {
     console.error("[OAuth] Missing credentials or refresh token");
@@ -800,7 +806,7 @@ app.get("/api/billing-control", authenticate, async (req, res) => {
           nf_issued_by_name: control?.issued_by?.name,
         };
       });
-    } else {
+    } else if (db) {
       const companies = db.prepare("SELECT id, nome_fantasia FROM companies").all();
       controls = companies.map((c: any) => {
         const control = db.prepare(`
@@ -870,7 +876,7 @@ app.post("/api/billing-control/toggle", authenticate, async (req: any, res) => {
           user_id: userId
         });
       }
-    } else {
+    } else if (db) {
       const current = db.prepare("SELECT * FROM billing_controls WHERE company_id = ? AND month = ?").get(company_id, month) as any;
       const newValue = current ? (current[field] ? 0 : 1) : 1;
       
@@ -914,7 +920,7 @@ app.get("/api/billing-control/history", authenticate, async (req, res) => {
         user_name: h.user?.name,
         company_name: h.company?.nome_fantasia
       }));
-    } else {
+    } else if (db) {
       history = db.prepare(`
         SELECT bh.*, u.name as user_name, c.nome_fantasia as company_name
         FROM billing_history bh
@@ -931,25 +937,72 @@ app.get("/api/billing-control/history", authenticate, async (req, res) => {
 });
 
 // Logs
-app.get("/api/logs", authenticate, (req, res) => {
-  const logs = db.prepare(`
-    SELECT l.*, c.razao_social as company_name, t.name as template_name 
-    FROM sending_logs l
-    JOIN companies c ON l.company_id = c.id
-    JOIN templates t ON l.template_id = t.id
-    ORDER BY l.sent_at DESC
-  `).all();
-  res.json(logs);
+app.get("/api/logs", authenticate, async (req, res) => {
+  try {
+    let logs = [];
+    if (useSupabase) {
+      const { data } = await supabase
+        .from('sending_logs')
+        .select(`
+          *,
+          companies (razao_social),
+          templates (name)
+        `)
+        .order('sent_at', { ascending: false });
+      
+      logs = (data || []).map(l => ({
+        ...l,
+        company_name: l.companies?.razao_social,
+        template_name: l.templates?.name
+      }));
+    } else if (db) {
+      logs = db.prepare(`
+        SELECT l.*, c.razao_social as company_name, t.name as template_name 
+        FROM sending_logs l
+        JOIN companies c ON l.company_id = c.id
+        JOIN templates t ON l.template_id = t.id
+        ORDER BY l.sent_at DESC
+      `).all();
+    }
+    res.json(logs);
+  } catch (err) {
+    res.status(500).json({ error: "Erro ao buscar logs" });
+  }
 });
 
 // Stats
-app.get("/api/stats", authenticate, (req, res) => {
-  const companyCount = db.prepare("SELECT count(*) as count FROM companies").get() as any;
-  const sentThisMonth = db.prepare("SELECT count(*) as count FROM sending_logs WHERE strftime('%m', sent_at) = strftime('%m', 'now')").get() as any;
-  res.json({
-    totalCompanies: companyCount.count,
-    sentThisMonth: sentThisMonth.count,
-  });
+app.get("/api/stats", authenticate, async (req, res) => {
+  try {
+    let totalCompanies = 0;
+    let sentThisMonth = 0;
+
+    if (useSupabase) {
+      const { count: cCount } = await supabase.from('companies').select('id', { count: 'exact', head: true });
+      totalCompanies = cCount || 0;
+      
+      const firstDayOfMonth = new Date();
+      firstDayOfMonth.setDate(1);
+      firstDayOfMonth.setHours(0, 0, 0, 0);
+      
+      const { count: sCount } = await supabase
+        .from('sending_logs')
+        .select('id', { count: 'exact', head: true })
+        .gte('sent_at', firstDayOfMonth.toISOString());
+      sentThisMonth = sCount || 0;
+    } else if (db) {
+      const companyCount = db.prepare("SELECT count(*) as count FROM companies").get() as any;
+      const sentThisMonthRow = db.prepare("SELECT count(*) as count FROM sending_logs WHERE strftime('%m', sent_at) = strftime('%m', 'now')").get() as any;
+      totalCompanies = companyCount.count;
+      sentThisMonth = sentThisMonthRow.count;
+    }
+
+    res.json({
+      totalCompanies,
+      sentThisMonth,
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Erro ao buscar estatísticas" });
+  }
 });
 
 // Helper to get consistent Redirect URI
@@ -1003,38 +1056,38 @@ app.post("/api/settings/microsoft", authenticate, isAdmin, async (req, res) => {
   const updates = [];
 
   if (clientId !== undefined) {
-    db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("microsoft_client_id", clientId);
+    if (db) db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("microsoft_client_id", clientId);
     if (useSupabase) updates.push({ key: "microsoft_client_id", value: clientId });
   }
   
   if (clientSecret !== undefined && clientSecret !== "********") {
-    db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("microsoft_client_secret", clientSecret);
+    if (db) db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("microsoft_client_secret", clientSecret);
     if (useSupabase) updates.push({ key: "microsoft_client_secret", value: clientSecret });
   }
 
   if (tenantId !== undefined) {
     console.log(`[Settings] Saving Tenant ID: ${tenantId}`);
-    db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("microsoft_tenant_id", tenantId);
+    if (db) db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("microsoft_tenant_id", tenantId);
     if (useSupabase) updates.push({ key: "microsoft_tenant_id", value: tenantId });
   }
 
   if (globalCc !== undefined) {
-    db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("global_cc_email", globalCc);
+    if (db) db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("global_cc_email", globalCc);
     if (useSupabase) updates.push({ key: "global_cc_email", value: globalCc });
   }
 
   if (supabaseUrl !== undefined) {
-    db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("supabase_url", supabaseUrl);
+    if (db) db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("supabase_url", supabaseUrl);
     if (useSupabase) updates.push({ key: "supabase_url", value: supabaseUrl });
   }
 
   if (supabaseAnonKey !== undefined) {
-    db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("supabase_anon_key", supabaseAnonKey);
+    if (db) db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("supabase_anon_key", supabaseAnonKey);
     if (useSupabase) updates.push({ key: "supabase_anon_key", value: supabaseAnonKey });
   }
 
   if (supabaseServiceRoleKey !== undefined && supabaseServiceRoleKey !== "********") {
-    db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("supabase_service_role_key", supabaseServiceRoleKey);
+    if (db) db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)").run("supabase_service_role_key", supabaseServiceRoleKey);
     if (useSupabase) updates.push({ key: "supabase_service_role_key", value: supabaseServiceRoleKey });
   }
 
@@ -1051,13 +1104,10 @@ app.post("/api/settings/microsoft", authenticate, isAdmin, async (req, res) => {
 
 // --- Microsoft Graph OAuth ---
 
-app.get("/api/auth/microsoft/url", (req, res) => {
+app.get("/api/auth/microsoft/url", async (req, res) => {
   try {
-    const dbClientId = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("microsoft_client_id") as any;
-    const dbTenantId = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("microsoft_tenant_id") as any;
-    
-    const clientId = dbClientId?.value || process.env.MICROSOFT_CLIENT_ID;
-    const tenantId = dbTenantId?.value || process.env.MICROSOFT_TENANT_ID || "common";
+    const clientId = await getSetting("microsoft_client_id");
+    const tenantId = await getSetting("microsoft_tenant_id") || "common";
     
     if (!clientId) {
       return res.status(400).json({ error: "Microsoft Client ID não configurado. Salve-o primeiro." });
@@ -1094,13 +1144,9 @@ app.post("/api/auth/microsoft/callback", authenticate, async (req: any, res) => 
   // Clean up code after 1 minute to prevent memory leak
   setTimeout(() => usedCodes.delete(code), 60000);
   
-  const dbClientId = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("microsoft_client_id") as any;
-  const dbClientSecret = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("microsoft_client_secret") as any;
-  const dbTenantId = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("microsoft_tenant_id") as any;
-  
-  const clientId = dbClientId?.value || process.env.MICROSOFT_CLIENT_ID;
-  const clientSecret = dbClientSecret?.value || process.env.MICROSOFT_CLIENT_SECRET;
-  const tenantId = dbTenantId?.value || process.env.MICROSOFT_TENANT_ID || "common";
+  const clientId = await getSetting("microsoft_client_id");
+  const clientSecret = await getSetting("microsoft_client_secret");
+  const tenantId = await getSetting("microsoft_tenant_id") || "common";
   
   if (!clientId || !clientSecret) {
     console.error("[OAuth] Missing credentials in DB/Env");
@@ -1139,7 +1185,16 @@ app.post("/api/auth/microsoft/callback", authenticate, async (req: any, res) => 
         expires_at,
         last_auth_at
       });
-    } else {
+    } else if (db) {
+      await supabase.from('oauth_tokens').delete().eq('user_id', userId);
+      await supabase.from('oauth_tokens').insert({
+        user_id: userId,
+        access_token,
+        refresh_token,
+        expires_at,
+        last_auth_at
+      });
+    } else if (db) {
       db.prepare("DELETE FROM oauth_tokens WHERE user_id = ?").run(userId);
       db.prepare("INSERT INTO oauth_tokens (user_id, access_token, refresh_token, expires_at, last_auth_at) VALUES (?, ?, ?, ?, ?)")
         .run(userId, access_token, refresh_token, expires_at, last_auth_at);
