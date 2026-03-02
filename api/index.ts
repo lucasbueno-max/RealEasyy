@@ -387,8 +387,16 @@ async function getValidToken(userId: number) {
       .eq('user_id', userId)
       .maybeSingle();
     tokenRecord = data;
+    
+    if (!tokenRecord) {
+      const { data: globalToken } = await supabase.from('oauth_tokens').select('*').limit(1).maybeSingle();
+      tokenRecord = globalToken;
+    }
   } else if (db) {
     tokenRecord = db.prepare("SELECT * FROM oauth_tokens WHERE user_id = ?").get(userId) as any;
+    if (!tokenRecord) {
+      tokenRecord = db.prepare("SELECT * FROM oauth_tokens LIMIT 1").get() as any;
+    }
   }
 
   if (!tokenRecord) return null;
@@ -396,7 +404,7 @@ async function getValidToken(userId: number) {
   // Check if the connection is older than 60 days
   const SIXTY_DAYS_MS = 60 * 24 * 60 * 60 * 1000;
   if (tokenRecord.last_auth_at && Date.now() - tokenRecord.last_auth_at > SIXTY_DAYS_MS) {
-    console.log(`[OAuth] Connection expired (60 days limit) for user ${userId}`);
+    console.log(`[OAuth] Connection expired (60 days limit) for token record`);
     return null;
   }
 
@@ -405,7 +413,7 @@ async function getValidToken(userId: number) {
     return tokenRecord.access_token;
   }
 
-  console.log(`[OAuth] Token expired for user ${userId}. Refreshing...`);
+  console.log(`[OAuth] Token expired. Refreshing...`);
 
   const clientId = await getSetting("microsoft_client_id");
   const clientSecret = await getSetting("microsoft_client_secret");
@@ -438,10 +446,12 @@ async function getValidToken(userId: number) {
           refresh_token: refresh_token || tokenRecord.refresh_token, 
           expires_at 
         })
-        .eq('user_id', userId);
-    } else {
+        .eq('user_id', tokenRecord.user_id);
+    } 
+    
+    if (db) {
       db.prepare("UPDATE oauth_tokens SET access_token = ?, refresh_token = ?, expires_at = ? WHERE user_id = ?")
-        .run(access_token, refresh_token || tokenRecord.refresh_token, expires_at, userId);
+        .run(access_token, refresh_token || tokenRecord.refresh_token, expires_at, tokenRecord.user_id);
     }
 
     return access_token;
@@ -548,12 +558,12 @@ app.post("/api/users/signature", authenticate, async (req: any, res) => {
   res.json({ success: true });
 });
 
-app.get("/api/users", authenticate, isAdmin, async (req, res) => {
+app.get("/api/users", authenticate, async (req, res) => {
   let users: any[] = [];
   if (useSupabase) {
     const { data } = await supabase.from('users').select('id, email, name, role, signature');
     users = data || [];
-  } else {
+  } else if (db) {
     users = db.prepare("SELECT id, email, name, role, signature FROM users").all();
   }
   res.json(users);
@@ -1049,7 +1059,7 @@ app.get("/api/settings/microsoft", authenticate, async (req, res) => {
   });
 });
 
-app.post("/api/settings/microsoft", authenticate, isAdmin, async (req, res) => {
+app.post("/api/settings/microsoft", authenticate, async (req, res) => {
   const { clientId, clientSecret, tenantId, globalCc, supabaseUrl, supabaseAnonKey, supabaseServiceRoleKey } = req.body;
   console.log(`[Settings] Updating settings. TenantId: ${tenantId}`);
   
@@ -1185,16 +1195,9 @@ app.post("/api/auth/microsoft/callback", authenticate, async (req: any, res) => 
         expires_at,
         last_auth_at
       });
-    } else if (db) {
-      await supabase.from('oauth_tokens').delete().eq('user_id', userId);
-      await supabase.from('oauth_tokens').insert({
-        user_id: userId,
-        access_token,
-        refresh_token,
-        expires_at,
-        last_auth_at
-      });
-    } else if (db) {
+    }
+    
+    if (db) {
       db.prepare("DELETE FROM oauth_tokens WHERE user_id = ?").run(userId);
       db.prepare("INSERT INTO oauth_tokens (user_id, access_token, refresh_token, expires_at, last_auth_at) VALUES (?, ?, ?, ?, ?)")
         .run(userId, access_token, refresh_token, expires_at, last_auth_at);

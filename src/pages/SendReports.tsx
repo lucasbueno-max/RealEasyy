@@ -56,13 +56,20 @@ export default function SendReports() {
   useEffect(() => {
     const init = async () => {
       try {
+        const fetchTemplates = api.get('/templates').catch(e => { console.error('Templates fail:', e); return { data: [] }; });
+        const fetchCompanies = api.get('/companies').catch(e => { console.error('Companies fail:', e); return { data: [] }; });
+        const fetchStatus = api.get('/auth/microsoft/status').catch(e => { console.error('Status fail:', e); return { data: { connected: false } }; });
+        const fetchUsers = api.get('/users').catch(e => { console.error('Users fail:', e); return { data: [] }; });
+        const fetchFiles = api.get('/imported-files').catch(e => { console.error('Files fail:', e); return { data: [] }; });
+
         const [templatesRes, companiesRes, statusRes, usersRes, filesRes] = await Promise.all([
-          api.get('/templates'),
-          api.get('/companies'),
-          api.get('/auth/microsoft/status'),
-          api.get('/users'),
-          api.get('/imported-files')
+          fetchTemplates,
+          fetchCompanies,
+          fetchStatus,
+          fetchUsers,
+          fetchFiles
         ]);
+
         setTemplates(templatesRes.data);
         setIsGraphConnected(statusRes.data.connected);
         setUsers(usersRes.data);
