@@ -52,6 +52,7 @@ async function getJwtSecret() {
   const stored = await getSetting("jwt_secret");
   if (stored) {
     JWT_SECRET = stored;
+    console.log("[Auth] JWT Secret loaded from settings.");
     return;
   }
   
@@ -59,6 +60,7 @@ async function getJwtSecret() {
   if (db) {
     try {
       db.prepare("INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?)").run("jwt_secret", JWT_SECRET);
+      console.log("[Auth] JWT Secret initialized and persisted.");
     } catch (e) {}
   }
 }
@@ -383,7 +385,7 @@ const authenticate = async (req: any, res: any, next: any) => {
     try {
       const { data: { user }, error } = await supabase.auth.getUser(token);
       if (error) {
-        console.warn(`[Auth] Supabase token verification failed for ${token.substring(0, 10)}...: ${error.message}`);
+        console.warn(`[Auth] Supabase token verification failed: ${error.message} (Token: ${token.substring(0, 15)}...)`);
       } else if (user) {
         // Fetch additional user data from public.users
         const { data: userData } = await supabase
@@ -400,7 +402,6 @@ const authenticate = async (req: any, res: any, next: any) => {
         };
         return next();
       }
-      console.log("[Auth] Supabase auth failed or no user, trying local JWT fallback...");
     } catch (err: any) {
       console.warn("[Auth] Supabase auth exception:", err.message);
     }
@@ -412,7 +413,7 @@ const authenticate = async (req: any, res: any, next: any) => {
     req.user = decoded;
     next();
   } catch (err: any) {
-    console.error(`[Auth] Local JWT verification failed: ${err.message}`);
+    console.error(`[Auth] Authentication failed. Supabase: ${useSupabase ? 'tried' : 'skipped'}, Local JWT: ${err.message}`);
     res.status(401).json({ error: "Sessão inválida ou expirada. Por favor, faça login novamente." });
   }
 };
