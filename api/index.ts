@@ -183,6 +183,30 @@ async function initialize() {
     value TEXT
   );
 
+  CREATE TABLE IF NOT EXISTS billing_controls (
+    company_id INTEGER,
+    month TEXT,
+    billing_sent BOOLEAN DEFAULT 0,
+    billing_sent_at DATETIME,
+    billing_sent_by INTEGER,
+    billing_sent_by_name TEXT,
+    nf_issued BOOLEAN DEFAULT 0,
+    nf_issued_at DATETIME,
+    nf_issued_by INTEGER,
+    nf_issued_by_name TEXT,
+    PRIMARY KEY(company_id, month)
+  );
+
+  CREATE TABLE IF NOT EXISTS billing_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER,
+    month TEXT,
+    user_id INTEGER,
+    user_name TEXT,
+    action TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
   CREATE TABLE IF NOT EXISTS imported_files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     file_name TEXT,
@@ -262,6 +286,29 @@ app.use(async (req, res, next) => {
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+// Helper to get settings from Supabase or SQLite
+async function getSetting(key: string) {
+  if (useSupabase) {
+    try {
+      const { data, error } = await supabase.from('app_settings').select('value').eq('key', key).maybeSingle();
+      if (!error && data) return data.value;
+    } catch (e) {
+      console.error(`[Settings] Error reading ${key} from Supabase:`, e);
+    }
+  }
+  
+  if (db) {
+    try {
+      const row = db.prepare("SELECT value FROM app_settings WHERE key = ?").get(key) as any;
+      return row?.value;
+    } catch (e) {
+      console.error(`[Settings] Error reading ${key} from SQLite:`, e);
+    }
+  }
+  
+  return null;
+}
 
 // Auth Middleware
 const authenticate = async (req: any, res: any, next: any) => {
@@ -723,6 +770,166 @@ app.delete("/api/templates/:id", authenticate, async (req, res) => {
   }
 });
 
+// --- Billing Control ---
+
+app.get("/api/billing-control", authenticate, async (req, res) => {
+  const { month } = req.query;
+  if (!month) return res.status(400).json({ error: "Mês é obrigatório" });
+
+  try {
+    let controls: any[] = [];
+    if (useSupabase) {
+      const { data } = await supabase
+        .from('billing_controls')
+        .select('*, company:companies(nome_fantasia), sent_by:users!billing_sent_by(name), issued_by:users!nf_issued_by(name)')
+        .eq('month', month);
+      
+      const { data: companies } = await supabase.from('companies').select('id, nome_fantasia');
+      
+      controls = (companies || []).map(c => {
+        const control = (data || []).find(d => d.company_id === c.id);
+        return {
+          company_id: c.id,
+          company_name: c.nome_fantasia,
+          month,
+          billing_sent: control?.billing_sent || false,
+          billing_sent_at: control?.billing_sent_at,
+          billing_sent_by_name: control?.sent_by?.name,
+          nf_issued: control?.nf_issued || false,
+          nf_issued_at: control?.nf_issued_at,
+          nf_issued_by_name: control?.issued_by?.name,
+        };
+      });
+    } else {
+      const companies = db.prepare("SELECT id, nome_fantasia FROM companies").all();
+      controls = companies.map((c: any) => {
+        const control = db.prepare(`
+          SELECT bc.*, u1.name as billing_sent_by_name, u2.name as nf_issued_by_name
+          FROM billing_controls bc
+          LEFT JOIN users u1 ON bc.billing_sent_by = u1.id
+          LEFT JOIN users u2 ON bc.nf_issued_by = u2.id
+          WHERE bc.company_id = ? AND bc.month = ?
+        `).get(c.id, month) as any;
+
+        return {
+          company_id: c.id,
+          company_name: c.nome_fantasia,
+          month,
+          billing_sent: !!control?.billing_sent,
+          billing_sent_at: control?.billing_sent_at,
+          billing_sent_by_name: control?.billing_sent_by_name,
+          nf_issued: !!control?.nf_issued,
+          nf_issued_at: control?.nf_issued_at,
+          nf_issued_by_name: control?.nf_issued_by_name,
+        };
+      });
+    }
+    res.json(controls);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/billing-control/toggle", authenticate, async (req: any, res) => {
+  const { company_id, month, field } = req.body;
+  if (!company_id || !month || !field) return res.status(400).json({ error: "Dados incompletos" });
+  if (field !== 'billing_sent' && field !== 'nf_issued') return res.status(400).json({ error: "Campo inválido" });
+
+  const userId = req.user.id;
+  const now = new Date().toISOString();
+
+  try {
+    if (useSupabase) {
+      // Get current state
+      const { data: current } = await supabase
+        .from('billing_controls')
+        .select('*')
+        .eq('company_id', company_id)
+        .eq('month', month)
+        .maybeSingle();
+
+      const newValue = !current?.[field];
+      const updates: any = {
+        company_id,
+        month,
+        [field]: newValue,
+        [`${field}_at`]: newValue ? now : null,
+        [`${field}_by`]: newValue ? userId : null
+      };
+
+      const { error } = await supabase.from('billing_controls').upsert(updates);
+      if (error) throw error;
+
+      // History
+      if (newValue) {
+        const action = field === 'billing_sent' ? 'Faturamento Enviado' : 'NF Emitida';
+        await supabase.from('billing_history').insert({
+          company_id,
+          month,
+          action,
+          user_id: userId
+        });
+      }
+    } else {
+      const current = db.prepare("SELECT * FROM billing_controls WHERE company_id = ? AND month = ?").get(company_id, month) as any;
+      const newValue = current ? (current[field] ? 0 : 1) : 1;
+      
+      const atField = `${field}_at`;
+      const byField = `${field}_by`;
+
+      db.prepare(`
+        INSERT INTO billing_controls (company_id, month, ${field}, ${atField}, ${byField})
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(company_id, month) DO UPDATE SET
+          ${field} = excluded.${field},
+          ${atField} = excluded.${atField},
+          ${byField} = excluded.${byField}
+      `).run(company_id, month, newValue, newValue ? now : null, newValue ? userId : null);
+
+      if (newValue) {
+        const action = field === 'billing_sent' ? 'Faturamento Enviado' : 'NF Emitida';
+        db.prepare("INSERT INTO billing_history (company_id, month, action, user_id) VALUES (?, ?, ?, ?)").run(company_id, month, action, userId);
+      }
+    }
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/billing-control/history", authenticate, async (req, res) => {
+  const { company_id, month } = req.query;
+  try {
+    let history: any[] = [];
+    if (useSupabase) {
+      const { data } = await supabase
+        .from('billing_history')
+        .select('*, user:users(name), company:companies(nome_fantasia)')
+        .eq('company_id', company_id)
+        .eq('month', month)
+        .order('created_at', { ascending: false });
+      
+      history = (data || []).map(h => ({
+        ...h,
+        user_name: h.user?.name,
+        company_name: h.company?.nome_fantasia
+      }));
+    } else {
+      history = db.prepare(`
+        SELECT bh.*, u.name as user_name, c.nome_fantasia as company_name
+        FROM billing_history bh
+        JOIN users u ON bh.user_id = u.id
+        JOIN companies c ON bh.company_id = c.id
+        WHERE bh.company_id = ? AND bh.month = ?
+        ORDER BY bh.created_at DESC
+      `).all(company_id, month);
+    }
+    res.json(history);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Logs
 app.get("/api/logs", authenticate, (req, res) => {
   const logs = db.prepare(`
@@ -765,26 +972,26 @@ const getRedirectUri = (req: express.Request) => {
 };
 
 // App Settings
-app.get("/api/settings/microsoft", authenticate, (req, res) => {
-  const clientId = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("microsoft_client_id") as any;
-  const clientSecret = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("microsoft_client_secret") as any;
-  const tenantId = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("microsoft_tenant_id") as any;
-  const globalCc = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("global_cc_email") as any;
-  const supabaseUrl = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("supabase_url") as any;
-  const supabaseAnonKey = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("supabase_anon_key") as any;
-  const supabaseServiceRoleKey = db.prepare("SELECT value FROM app_settings WHERE key = ?").get("supabase_service_role_key") as any;
+app.get("/api/settings/microsoft", authenticate, async (req, res) => {
+  const clientId = await getSetting("microsoft_client_id");
+  const clientSecret = await getSetting("microsoft_client_secret");
+  const tenantId = await getSetting("microsoft_tenant_id");
+  const globalCc = await getSetting("global_cc_email");
+  const supabaseUrl = await getSetting("supabase_url");
+  const supabaseAnonKey = await getSetting("supabase_anon_key");
+  const supabaseServiceRoleKey = await getSetting("supabase_service_role_key");
   
   const redirectUri = getRedirectUri(req);
 
   res.json({
-    clientId: clientId?.value || process.env.MICROSOFT_CLIENT_ID || "",
-    clientSecret: clientSecret?.value ? "********" : (process.env.MICROSOFT_CLIENT_SECRET ? "********" : ""),
-    tenantId: tenantId?.value || process.env.MICROSOFT_TENANT_ID || "common",
-    globalCc: globalCc?.value || "",
-    supabaseUrl: supabaseUrl?.value || process.env.SUPABASE_URL || "",
-    supabaseAnonKey: supabaseAnonKey?.value || process.env.SUPABASE_ANON_KEY || "",
-    supabaseServiceRoleKey: supabaseServiceRoleKey?.value ? "********" : (process.env.SUPABASE_SERVICE_ROLE_KEY ? "********" : ""),
-    hasSecret: !!(clientSecret?.value || process.env.MICROSOFT_CLIENT_SECRET),
+    clientId: clientId || process.env.MICROSOFT_CLIENT_ID || "",
+    clientSecret: clientSecret ? "********" : (process.env.MICROSOFT_CLIENT_SECRET ? "********" : ""),
+    tenantId: tenantId || process.env.MICROSOFT_TENANT_ID || "common",
+    globalCc: globalCc || "",
+    supabaseUrl: supabaseUrl || process.env.SUPABASE_URL || "",
+    supabaseAnonKey: supabaseAnonKey || process.env.SUPABASE_ANON_KEY || "",
+    supabaseServiceRoleKey: supabaseServiceRoleKey ? "********" : (process.env.SUPABASE_SERVICE_ROLE_KEY ? "********" : ""),
+    hasSecret: !!(clientSecret || process.env.MICROSOFT_CLIENT_SECRET),
     redirectUri: redirectUri
   });
 });

@@ -50,3 +50,29 @@ export interface Log {
   status: 'success' | 'error';
   error_message?: string;
 }
+
+export interface BillingControl {
+  id: number;
+  company_id: number;
+  company_name?: string;
+  month: string;
+  billing_sent: boolean;
+  billing_sent_at?: string;
+  billing_sent_by?: number;
+  billing_sent_by_name?: string;
+  nf_issued: boolean;
+  nf_issued_at?: string;
+  nf_issued_by?: number;
+  nf_issued_by_name?: string;
+}
+
+export interface BillingHistory {
+  id: number;
+  company_id: number;
+  company_name: string;
+  month: string;
+  action: string;
+  user_id: number;
+  user_name: string;
+  created_at: string;
+}

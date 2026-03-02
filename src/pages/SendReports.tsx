@@ -175,7 +175,7 @@ export default function SendReports() {
 
   const handleSend = async () => {
     if (!selectedTemplateId) return alert('Selecione um modelo de relatório');
-    if (!globalDataAporte || !globalDataDebito) return alert('Preencha as datas de aporte e débito no Passo 1');
+    // Removed mandatory check for globalDataAporte and globalDataDebito
     if (!isGraphConnected) return alert('Conecte sua conta Microsoft nas configurações');
 
     const itemsToSend = filteredItems.filter(item => item.selected && item.status !== 'success');

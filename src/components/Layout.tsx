@@ -13,7 +13,8 @@ import {
   Menu,
   X,
   Users,
-  User
+  User,
+  DollarSign
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -34,6 +35,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     { icon: FileText, label: 'Modelos', path: '/templates' },
     { icon: FileUp, label: 'Importar Arquivos', path: '/import-files' },
     { icon: Send, label: 'Enviar Relatórios', path: '/send' },
+    { icon: DollarSign, label: 'Faturamento', path: '/billing' },
     { icon: History, label: 'Histórico', path: '/history' },
     { icon: User, label: 'Meu Perfil', path: '/profile' },
     { icon: Users, label: 'Usuários', path: '/users', adminOnly: true },
