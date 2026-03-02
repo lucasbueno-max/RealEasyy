@@ -257,6 +257,16 @@ async function initialize() {
       db.exec("ALTER TABLE imported_files ADD COLUMN extracted_value TEXT");
     } catch (e) {}
 
+    try {
+      db.exec("ALTER TABLE billing_controls ADD COLUMN billing_sent_by_name TEXT");
+    } catch (e) {}
+    try {
+      db.exec("ALTER TABLE billing_controls ADD COLUMN nf_issued_by_name TEXT");
+    } catch (e) {}
+    try {
+      db.exec("ALTER TABLE billing_history ADD COLUMN user_name TEXT");
+    } catch (e) {}
+
     // Migration: Remove foreign key from oauth_tokens if it exists (by recreating table)
     try {
       const tableInfo = db.prepare("PRAGMA foreign_key_list(oauth_tokens)").all();
@@ -895,7 +905,12 @@ app.post("/api/billing-control/toggle", authenticate, async (req: any, res) => {
   if (!company_id || !month || !field) return res.status(400).json({ error: "Dados incompletos" });
   if (field !== 'billing_sent' && field !== 'nf_issued') return res.status(400).json({ error: "Campo inválido" });
 
-  const userId = req.user.id;
+  const userId = req.user?.id;
+  if (!userId) {
+    console.error("[Billing] User ID missing in request");
+    return res.status(401).json({ error: "Usuário não identificado" });
+  }
+  
   const now = new Date().toISOString();
 
   try {
@@ -925,29 +940,37 @@ app.post("/api/billing-control/toggle", authenticate, async (req: any, res) => {
       };
 
       const { error } = await supabase.from('billing_controls').upsert(updates);
-      if (error) throw error;
+      if (error) {
+        console.error("[Billing] Supabase upsert error:", error);
+        // Fallback: try without the _by_name column in case it's missing in DB
+        const fallbackUpdates = { ...updates };
+        delete fallbackUpdates[`${field}_by_name`];
+        const { error: error2 } = await supabase.from('billing_controls').upsert(fallbackUpdates);
+        if (error2) throw error2;
+      }
 
       // History
       if (newValue) {
         const action = field === 'billing_sent' ? 'Faturamento Enviado' : 'NF Emitida';
         
-        // Get user name for history
-        let userName = "Usuário";
-        if (useSupabase) {
-          const { data: u } = await supabase.from('users').select('name').eq('id', userId).maybeSingle();
-          if (u) userName = u.name;
-        } else if (db) {
-          const u = db.prepare("SELECT name FROM users WHERE id = ?").get(userId) as any;
-          if (u) userName = u.name;
+        try {
+          await supabase.from('billing_history').insert({
+            company_id,
+            month,
+            action,
+            user_id: userId,
+            user_name: userName
+          });
+        } catch (historyErr) {
+          console.error("[Billing] History insert error (ignoring):", historyErr);
+          // Try without user_name
+          await supabase.from('billing_history').insert({
+            company_id,
+            month,
+            action,
+            user_id: userId
+          }).catch(() => {});
         }
-
-        await supabase.from('billing_history').insert({
-          company_id,
-          month,
-          action,
-          user_id: userId,
-          user_name: userName
-        });
       }
     } else if (db) {
       const current = db.prepare("SELECT * FROM billing_controls WHERE company_id = ? AND month = ?").get(company_id, month) as any;
@@ -961,24 +984,37 @@ app.post("/api/billing-control/toggle", authenticate, async (req: any, res) => {
       const u = db.prepare("SELECT name FROM users WHERE id = ?").get(userId) as any;
       const userName = u?.name || "Usuário";
 
-      db.prepare(`
-        INSERT INTO billing_controls (company_id, month, ${field}, ${atField}, ${byField}, ${byNameField})
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(company_id, month) DO UPDATE SET
-          ${field} = excluded.${field},
-          ${atField} = excluded.${atField},
-          ${byField} = excluded.${byField},
-          ${byNameField} = excluded.${byNameField}
-      `).run(company_id, month, newValue, newValue ? now : null, newValue ? userId : null, newValue ? userName : null);
+      try {
+        db.prepare(`
+          INSERT INTO billing_controls (company_id, month, ${field}, ${atField}, ${byField}, ${byNameField})
+          VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(company_id, month) DO UPDATE SET
+            ${field} = excluded.${field},
+            ${atField} = excluded.${atField},
+            ${byField} = excluded.${byField},
+            ${byNameField} = excluded.${byNameField}
+        `).run(company_id, month, newValue, newValue ? now : null, newValue ? userId : null, newValue ? userName : null);
+      } catch (e) {
+        console.error("[Billing] SQLite toggle error, trying fallback:", e);
+        // Fallback without byNameField
+        db.prepare(`
+          INSERT INTO billing_controls (company_id, month, ${field}, ${atField}, ${byField})
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(company_id, month) DO UPDATE SET
+            ${field} = excluded.${field},
+            ${atField} = excluded.${atField},
+            ${byField} = excluded.${byField}
+        `).run(company_id, month, newValue, newValue ? now : null, newValue ? userId : null);
+      }
 
       if (newValue) {
         const action = field === 'billing_sent' ? 'Faturamento Enviado' : 'NF Emitida';
         
-        // Get user name for history
-        const u = db.prepare("SELECT name FROM users WHERE id = ?").get(userId) as any;
-        const userName = u?.name || "Usuário";
-
-        db.prepare("INSERT INTO billing_history (company_id, month, action, user_id, user_name) VALUES (?, ?, ?, ?, ?)").run(company_id, month, action, userId, userName);
+        try {
+          db.prepare("INSERT INTO billing_history (company_id, month, action, user_id, user_name) VALUES (?, ?, ?, ?, ?)").run(company_id, month, action, userId, userName);
+        } catch (e) {
+          db.prepare("INSERT INTO billing_history (company_id, month, action, user_id) VALUES (?, ?, ?, ?)").run(company_id, month, action, userId);
+        }
       }
     }
     res.json({ success: true });
