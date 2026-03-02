@@ -265,39 +265,48 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Auth Middleware
 const authenticate = async (req: any, res: any, next: any) => {
-  const token = req.headers.authorization?.split(" ")[1];
-  if (!token) return res.status(401).json({ error: "Unauthorized" });
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.split(" ")[1];
+  
+  if (!token || token === "null" || token === "undefined") {
+    console.warn("[Auth] No token provided or invalid token string");
+    return res.status(401).json({ error: "Unauthorized" });
+  }
 
+  // Try Supabase first if enabled
   if (useSupabase) {
     try {
       const { data: { user }, error } = await supabase.auth.getUser(token);
-      if (error || !user) return res.status(401).json({ error: "Invalid token" });
-      
-      // Fetch additional user data (role, signature) from public.users
-      const { data: userData } = await supabase
-        .from('users')
-        .select('id, email, name, role, signature')
-        .eq('email', user.email)
-        .maybeSingle();
-      
-      req.user = { 
-        id: userData?.id || user.id, 
-        email: user.email, 
-        role: (user.email === 'lucas@solfus.com.br' || user.email === 'admin@example.com') ? 'admin' : (userData?.role || 'user'),
-        name: userData?.name || user.user_metadata?.full_name
-      };
-      next();
+      if (!error && user) {
+        // Fetch additional user data from public.users
+        const { data: userData } = await supabase
+          .from('users')
+          .select('id, email, name, role, signature')
+          .eq('email', user.email)
+          .maybeSingle();
+        
+        req.user = { 
+          id: userData?.id || user.id, 
+          email: user.email, 
+          role: (user.email === 'lucas@solfus.com.br' || user.email === 'admin@example.com') ? 'admin' : (userData?.role || 'user'),
+          name: userData?.name || user.user_metadata?.full_name || "Usuário"
+        };
+        return next();
+      }
+      console.log("[Auth] Supabase token verification failed, trying local JWT fallback...");
     } catch (err) {
-      res.status(401).json({ error: "Invalid token" });
+      console.warn("[Auth] Supabase auth error:", err);
     }
-  } else {
-    try {
-      const decoded = jwt.verify(token, JWT_SECRET) as any;
-      req.user = decoded;
-      next();
-    } catch (err) {
-      res.status(401).json({ error: "Invalid token" });
-    }
+  }
+
+  // Fallback to local JWT (handles transition or local dev)
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    req.user = decoded;
+    next();
+  } catch (err) {
+    console.error("[Auth] All authentication methods failed for token");
+    res.status(401).json({ error: "Invalid token" });
   }
 };
 
@@ -521,53 +530,53 @@ app.post("/api/users", authenticate, isAdmin, async (req, res) => {
   }
 });
 
-app.put("/api/users/:id", authenticate, isAdmin, (req, res) => {
+app.put("/api/users/:id", authenticate, isAdmin, async (req, res) => {
   const { email, name, role, signature } = req.body;
   try {
-    db.prepare("UPDATE users SET email = ?, name = ?, role = ?, signature = ? WHERE id = ?")
-      .run(email, name, role, signature, req.params.id);
+    if (useSupabase) {
+      const { error } = await supabase
+        .from('users')
+        .update({ email, name, role, signature })
+        .eq('id', req.params.id);
+      if (error) throw error;
+    } else {
+      db.prepare("UPDATE users SET email = ?, name = ?, role = ?, signature = ? WHERE id = ?")
+        .run(email, name, role, signature, req.params.id);
+    }
     res.json({ success: true });
   } catch (err: any) {
     res.status(400).json({ error: "Erro ao atualizar usuário" });
   }
 });
 
-app.delete("/api/users/:id", authenticate, isAdmin, (req: any, res) => {
+app.delete("/api/users/:id", authenticate, isAdmin, async (req: any, res) => {
   const userIdToDelete = parseInt(req.params.id);
   const currentUserId = req.user.id;
   
-  console.log(`[Delete User] Attempting to delete user ${userIdToDelete}. Current user: ${currentUserId}`);
-
   if (isNaN(userIdToDelete)) {
     return res.status(400).json({ error: "ID de usuário inválido" });
   }
 
   if (userIdToDelete === currentUserId) {
-    console.warn(`[Delete User] User ${currentUserId} tried to delete themselves.`);
     return res.status(400).json({ error: "Você não pode excluir a si mesmo" });
   }
 
   try {
-    const deleteTx = db.transaction(() => {
-      // Delete associated tokens first to satisfy foreign key constraints
-      console.log(`[Delete User] Deleting tokens for user ${userIdToDelete}`);
-      db.prepare("DELETE FROM oauth_tokens WHERE user_id = ?").run(userIdToDelete);
-      
+    if (useSupabase) {
+      // Delete associated tokens first
+      await supabase.from('oauth_tokens').delete().eq('user_id', userIdToDelete);
       // Then delete the user
-      console.log(`[Delete User] Deleting user ${userIdToDelete} from users table`);
-      return db.prepare("DELETE FROM users WHERE id = ?").run(userIdToDelete);
-    });
-
-    const result = deleteTx();
-    console.log(`[Delete User] Result:`, result);
-
-    if (result.changes === 0) {
-      return res.status(404).json({ error: "Usuário não encontrado" });
+      const { error } = await supabase.from('users').delete().eq('id', userIdToDelete);
+      if (error) throw error;
+    } else {
+      const deleteTx = db.transaction(() => {
+        db.prepare("DELETE FROM oauth_tokens WHERE user_id = ?").run(userIdToDelete);
+        return db.prepare("DELETE FROM users WHERE id = ?").run(userIdToDelete);
+      });
+      deleteTx();
     }
-
     res.json({ success: true });
   } catch (err: any) {
-    console.error("[Delete User] Database error:", err);
     res.status(500).json({ error: "Erro ao excluir usuário: " + err.message });
   }
 });
@@ -618,16 +627,43 @@ app.post("/api/companies", authenticate, async (req, res) => {
   }
 });
 
-app.put("/api/companies/:id", authenticate, (req, res) => {
+app.put("/api/companies/:id", authenticate, async (req, res) => {
   const { razao_social, nome_fantasia, cnpj, emails, manager_id } = req.body;
-  db.prepare("UPDATE companies SET razao_social = ?, nome_fantasia = ?, cnpj = ?, emails = ?, manager_id = ? WHERE id = ?")
-    .run(razao_social, nome_fantasia, cnpj, JSON.stringify(emails), manager_id || null, req.params.id);
-  res.json({ success: true });
+  try {
+    if (useSupabase) {
+      const { error } = await supabase
+        .from('companies')
+        .update({
+          razao_social,
+          nome_fantasia,
+          cnpj,
+          emails: emails || [],
+          manager_id: manager_id || null
+        })
+        .eq('id', req.params.id);
+      if (error) throw error;
+    } else {
+      db.prepare("UPDATE companies SET razao_social = ?, nome_fantasia = ?, cnpj = ?, emails = ?, manager_id = ? WHERE id = ?")
+        .run(razao_social, nome_fantasia, cnpj, JSON.stringify(emails), manager_id || null, req.params.id);
+    }
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
-app.delete("/api/companies/:id", authenticate, (req, res) => {
-  db.prepare("DELETE FROM companies WHERE id = ?").run(req.params.id);
-  res.json({ success: true });
+app.delete("/api/companies/:id", authenticate, async (req, res) => {
+  try {
+    if (useSupabase) {
+      const { error } = await supabase.from('companies').delete().eq('id', req.params.id);
+      if (error) throw error;
+    } else {
+      db.prepare("DELETE FROM companies WHERE id = ?").run(req.params.id);
+    }
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 // Templates
@@ -654,16 +690,37 @@ app.post("/api/templates", authenticate, async (req, res) => {
   }
 });
 
-app.put("/api/templates/:id", authenticate, (req, res) => {
+app.put("/api/templates/:id", authenticate, async (req, res) => {
   const { name, subject, body } = req.body;
-  db.prepare("UPDATE templates SET name = ?, subject = ?, body = ? WHERE id = ?")
-    .run(name, subject, body, req.params.id);
-  res.json({ success: true });
+  try {
+    if (useSupabase) {
+      const { error } = await supabase
+        .from('templates')
+        .update({ name, subject, body })
+        .eq('id', req.params.id);
+      if (error) throw error;
+    } else {
+      db.prepare("UPDATE templates SET name = ?, subject = ?, body = ? WHERE id = ?")
+        .run(name, subject, body, req.params.id);
+    }
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
-app.delete("/api/templates/:id", authenticate, (req, res) => {
-  db.prepare("DELETE FROM templates WHERE id = ?").run(req.params.id);
-  res.json({ success: true });
+app.delete("/api/templates/:id", authenticate, async (req, res) => {
+  try {
+    if (useSupabase) {
+      const { error } = await supabase.from('templates').delete().eq('id', req.params.id);
+      if (error) throw error;
+    } else {
+      db.prepare("DELETE FROM templates WHERE id = ?").run(req.params.id);
+    }
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 // Logs

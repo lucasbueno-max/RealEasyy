@@ -46,6 +46,8 @@ export default function SendReports() {
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
   const [selectedManagerId, setSelectedManagerId] = useState<string>('');
   const [refPeriod, setRefPeriod] = useState<string>(defaultPeriod);
+  const [globalDataAporte, setGlobalDataAporte] = useState<string>('');
+  const [globalDataDebito, setGlobalDataDebito] = useState<string>('');
   const [items, setItems] = useState<SendItem[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isSending, setIsSending] = useState(false);
@@ -173,6 +175,7 @@ export default function SendReports() {
 
   const handleSend = async () => {
     if (!selectedTemplateId) return alert('Selecione um modelo de relatório');
+    if (!globalDataAporte || !globalDataDebito) return alert('Preencha as datas de aporte e débito no Passo 1');
     if (!isGraphConnected) return alert('Conecte sua conta Microsoft nas configurações');
 
     const itemsToSend = filteredItems.filter(item => item.selected && item.status !== 'success');
@@ -192,8 +195,8 @@ export default function SendReports() {
         mesReferencia: refPeriod,
         items: itemsToSend.map(i => ({
           companyId: i.companyId,
-          dataAporte: i.dataAporte,
-          dataDebito: i.dataDebito,
+          dataAporte: globalDataAporte,
+          dataDebito: globalDataDebito,
           valor: i.valor,
           pdfBase64: i.pdfBase64
         }))
@@ -247,44 +250,75 @@ export default function SendReports() {
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div className="md:col-span-2 space-y-4">
-          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            <div className="lg:col-span-1">
-              <label className="block text-sm font-medium text-slate-700 mb-2">1. Selecione o Modelo</label>
-              <select
-                value={selectedTemplateId}
-                onChange={(e) => setSelectedTemplateId(e.target.value)}
-                className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none transition-all"
-              >
-                <option value="">Escolha um modelo...</option>
-                {templates.map(t => (
-                  <option key={t.id} value={t.id}>{t.name}</option>
-                ))}
-              </select>
+          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm space-y-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              <div className="lg:col-span-1">
+                <label className="block text-sm font-medium text-slate-700 mb-2">1. Selecione o Modelo</label>
+                <select
+                  value={selectedTemplateId}
+                  onChange={(e) => setSelectedTemplateId(e.target.value)}
+                  className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none transition-all"
+                >
+                  <option value="">Escolha um modelo...</option>
+                  {templates.map(t => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">Mês/Ano Ref.</label>
+                <select
+                  value={refPeriod}
+                  onChange={(e) => setRefPeriod(e.target.value)}
+                  className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none transition-all"
+                >
+                  {periods.map(p => (
+                    <option key={p} value={p}>{p}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="md:col-span-2 lg:col-span-1">
+                <label className="block text-sm font-medium text-slate-700 mb-2">Filtrar por Gestor</label>
+                <select
+                  value={selectedManagerId}
+                  onChange={(e) => setSelectedManagerId(e.target.value)}
+                  className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none transition-all"
+                >
+                  <option value="">Todos os gestores</option>
+                  {users.map(u => (
+                    <option key={u.id} value={u.id}>{u.name}</option>
+                  ))}
+                </select>
+              </div>
             </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">Mês/Ano Ref.</label>
-              <select
-                value={refPeriod}
-                onChange={(e) => setRefPeriod(e.target.value)}
-                className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none transition-all"
-              >
-                {periods.map(p => (
-                  <option key={p} value={p}>{p}</option>
-                ))}
-              </select>
-            </div>
-            <div className="md:col-span-2 lg:col-span-1">
-              <label className="block text-sm font-medium text-slate-700 mb-2">Filtrar por Gestor</label>
-              <select
-                value={selectedManagerId}
-                onChange={(e) => setSelectedManagerId(e.target.value)}
-                className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none transition-all"
-              >
-                <option value="">Todos os gestores</option>
-                {users.map(u => (
-                  <option key={u.id} value={u.id}>{u.name}</option>
-                ))}
-              </select>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-slate-50">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">Data Aporte (Geral)</label>
+                <div className="relative">
+                  <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Ex: 10/03/2024"
+                    value={globalDataAporte}
+                    onChange={(e) => setGlobalDataAporte(e.target.value)}
+                    className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none transition-all"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">Data Débito (Geral)</label>
+                <div className="relative">
+                  <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Ex: 15/03/2024"
+                    value={globalDataDebito}
+                    onChange={(e) => setGlobalDataDebito(e.target.value)}
+                    className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none transition-all"
+                  />
+                </div>
+              </div>
             </div>
           </div>
 
@@ -378,35 +412,15 @@ export default function SendReports() {
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-3 gap-3">
+                  <div className="grid grid-cols-1 gap-3">
                     <div className="relative">
-                      <Calendar className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400" />
-                      <input
-                        type="text"
-                        placeholder="Data Aporte"
-                        value={item.dataAporte}
-                        onChange={(e) => updateItem(item.companyId, 'dataAporte', e.target.value)}
-                        className="w-full pl-7 pr-2 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:ring-1 focus:ring-orange-500 outline-none"
-                      />
-                    </div>
-                    <div className="relative">
-                      <Calendar className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400" />
-                      <input
-                        type="text"
-                        placeholder="Data Débito"
-                        value={item.dataDebito}
-                        onChange={(e) => updateItem(item.companyId, 'dataDebito', e.target.value)}
-                        className="w-full pl-7 pr-2 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:ring-1 focus:ring-orange-500 outline-none"
-                      />
-                    </div>
-                    <div className="relative">
-                      <DollarSign className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400" />
+                      <DollarSign className="absolute left-2 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                       <input
                         type="text"
                         placeholder="Valor"
                         value={item.valor}
                         onChange={(e) => updateItem(item.companyId, 'valor', e.target.value)}
-                        className="w-full pl-7 pr-2 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:ring-1 focus:ring-orange-500 outline-none"
+                        className="w-full pl-8 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-900 focus:ring-2 focus:ring-orange-500 outline-none transition-all"
                       />
                     </div>
                   </div>
