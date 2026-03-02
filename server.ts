@@ -1,5 +1,4 @@
 import express from "express";
-import { createServer as createViteServer } from "vite";
 import path from "path";
 import fs from "fs";
 import bcrypt from "bcryptjs";
@@ -1253,12 +1252,17 @@ app.post("/api/reports/send", authenticate, async (req: any, res) => {
 
 // Vite Middleware
 async function setupVite() {
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
+  if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
+    try {
+      const { createServer: createViteServer } = await import("vite");
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: "spa",
+      });
+      app.use(vite.middlewares);
+    } catch (e: any) {
+      console.warn("[Vite] Failed to load Vite middleware:", e.message);
+    }
   } else {
     const distPath = path.join(__dirname, "dist");
     console.log(`[Vite] Serving static files from: ${distPath}. Exists: ${fs.existsSync(distPath)}`);
